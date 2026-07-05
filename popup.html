@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>SmartFill</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <span class="brand">SmartFill</span>
+    <span class="hint">Alt+Shift+F fills too</span>
+  </header>
+
+  <section class="row">
+    <select id="profileSelect" title="Active profile"></select>
+    <button id="fillBtn" class="primary">Fill this page</button>
+  </section>
+
+  <div id="status" class="status" hidden></div>
+
+  <section class="auto">
+    <label class="toggle">
+      <input type="checkbox" id="autoToggle">
+      <span>Auto-fill on <b id="siteName">this site</b></span>
+    </label>
+    <div class="row">
+      <input id="siteInput" placeholder="paste a URL or domain">
+      <button id="addSite" class="ghost">Add</button>
+    </div>
+    <div id="siteList" class="sitelist"></div>
+  </section>
+
+  <details id="editor">
+    <summary>Edit profile</summary>
+    <div class="grid">
+      <label>Profile name<input id="p_label" placeholder="Personal"></label>
+      <label>First name<input id="p_firstName" autocomplete="off"></label>
+      <label>Last name<input id="p_lastName" autocomplete="off"></label>
+      <label>Email<input id="p_email" autocomplete="off"></label>
+      <label>Phone<input id="p_phone" autocomplete="off"></label>
+      <label>Date of birth<input id="p_dob" type="date"></label>
+      <label>Address<input id="p_address" autocomplete="off"></label>
+      <label>Address 2<input id="p_address2" autocomplete="off"></label>
+      <label>City<input id="p_city" autocomplete="off"></label>
+      <label>Province/State<input id="p_region" placeholder="Ontario" autocomplete="off"></label>
+      <label>Postal/ZIP<input id="p_postal" autocomplete="off"></label>
+      <label>Country<input id="p_country" placeholder="Canada" autocomplete="off"></label>
+      <label>Company<input id="p_company" autocomplete="off"></label>
+      <label class="tcg">Bandai TCG+ name<input id="p_bandaiName" placeholder="nickname" autocomplete="off"></label>
+      <label class="tcg">Bandai member #<input id="p_bandaiId" autocomplete="off"></label>
+      <label>Discord<input id="p_discord" placeholder="username" autocomplete="off"></label>
+    </div>
+
+    <h3>Custom fields</h3>
+    <p class="note">Match keywords (comma-separated) against a form field's label. First match wins.</p>
+    <div id="customList"></div>
+    <button id="addCustom" class="ghost">+ Add custom field</button>
+
+    <div class="row actions">
+      <button id="saveBtn" class="primary">Save</button>
+      <button id="newBtn" class="ghost">New profile</button>
+      <button id="deleteBtn" class="danger">Delete</button>
+    </div>
+  </details>
+
+  <footer>Data stays in this browser. Payment &amp; password fields are never filled.</footer>
+
+  <script src="popup.js"></script>
+</body>
+</html>
