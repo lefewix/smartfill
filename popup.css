@@ -171,6 +171,17 @@ button.danger:hover {
 }
 .chip button:hover { color: var(--txtstrong); background: transparent; }
 
+/* Per-site pinned field mappings */
+.pins {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 9px;
+  border-top: 1px solid var(--hair);
+}
+.pinhead { font-size: 10.5px; letter-spacing: .02em; color: var(--m7); }
+.pinhead b { color: var(--txt); font-family: var(--mono); font-weight: 600; }
+
 details { margin-top: 12px; }
 summary {
   cursor: pointer;
@@ -194,6 +205,8 @@ summary:hover { color: var(--txt); }
   color: var(--m7);
 }
 .grid label:nth-child(1) { grid-column: 1 / -1; }
+/* Game-account fields — tinted so they read as a group */
+.grid label.tcg { color: var(--ac-pale); }
 .grid input { font-size: 13px; }
 
 h3 {
@@ -218,3 +231,5 @@ footer {
   border-top: 1px solid var(--hair);
   padding-top: 10px;
 }
+.footactions { margin-bottom: 8px; }
+.footactions button { flex: 1; font-size: 12px; }

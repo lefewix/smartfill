@@ -13,7 +13,8 @@
 
   <section class="row">
     <select id="profileSelect" title="Active profile"></select>
-    <button id="fillBtn" class="primary">Fill this page</button>
+    <button id="previewBtn" class="ghost" title="Outline what would be filled, without writing anything">Preview</button>
+    <button id="fillBtn" class="primary">Fill</button>
   </section>
 
   <div id="status" class="status" hidden></div>
@@ -28,6 +29,11 @@
       <button id="addSite" class="ghost">Add</button>
     </div>
     <div id="siteList" class="sitelist"></div>
+
+    <div class="pins">
+      <span id="pinHead" class="pinhead">No pinned fields yet</span>
+      <div id="pinList" class="sitelist"></div>
+    </div>
   </section>
 
   <details id="editor">
@@ -63,7 +69,14 @@
     </div>
   </details>
 
-  <footer>Data stays in this browser. Payment &amp; password fields are never filled.</footer>
+  <footer>
+    <div class="row footactions">
+      <button id="exportBtn" class="ghost">Export profiles</button>
+      <button id="importBtn" class="ghost">Import</button>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </div>
+    <p>Data stays in this browser. Payment &amp; password fields are never filled.</p>
+  </footer>
 
   <script src="popup.js"></script>
 </body>

@@ -8,6 +8,7 @@ const FIELDS = [
 let profiles = [];
 let activeProfileId = null;
 let autoSites = [];
+let pins = {};          // { baseDomain: { descriptor: profileField } }
 let currentBase = null; // base domain of the active tab
 
 const $ = (id) => document.getElementById(id);
@@ -41,9 +42,10 @@ function normalizeSite(input) {
 }
 
 async function load() {
-  const data = await chrome.storage.local.get(["profiles", "activeProfileId", "autoSites"]);
+  const data = await chrome.storage.local.get(["profiles", "activeProfileId", "autoSites", "pins"]);
   profiles = data.profiles || [];
   autoSites = data.autoSites || [];
+  pins = data.pins || {};
   activeProfileId = data.activeProfileId || (profiles[0] && profiles[0].id) || null;
   if (!profiles.length) {
     newProfile();
@@ -61,8 +63,20 @@ async function load() {
   renderSites();
 }
 
+// Pins are also written by the content script after each fill, so they are
+// persisted on their own rather than round-tripped through every save here.
 function persist() {
   return chrome.storage.local.set({ profiles, activeProfileId, autoSites });
+}
+
+function persistPins() {
+  return chrome.storage.local.set({ pins });
+}
+
+async function refreshPins() {
+  const { pins: p = {} } = await chrome.storage.local.get(["pins"]);
+  pins = p;
+  renderPins();
 }
 
 function renderSites() {
@@ -93,6 +107,42 @@ function renderSites() {
       autoSites = autoSites.filter(v => v !== s);
       await persist();
       renderSites();
+    });
+    chip.appendChild(x);
+    list.appendChild(chip);
+  }
+
+  renderPins();
+}
+
+// Sites where a previous fill pinned descriptor → profile field mappings.
+function renderPins() {
+  const head = $("pinHead");
+  const list = $("pinList");
+  list.innerHTML = "";
+
+  const sites = Object.keys(pins).filter(s => Object.keys(pins[s] || {}).length).sort();
+  if (!sites.length) {
+    head.textContent = "No pinned fields yet";
+    return;
+  }
+  head.textContent = "";
+  head.append("Pinned fields on ");
+  const n = document.createElement("b");
+  n.textContent = String(sites.length);
+  head.append(n, ` site${sites.length === 1 ? "" : "s"}`);
+
+  for (const s of sites) {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    chip.textContent = `${s} ${Object.keys(pins[s]).length} `;
+    const x = document.createElement("button");
+    x.textContent = "✕";
+    x.title = `Clear pinned fields for ${s}`;
+    x.addEventListener("click", async () => {
+      delete pins[s];
+      await persistPins();
+      renderPins();
     });
     chip.appendChild(x);
     list.appendChild(chip);
@@ -233,44 +283,138 @@ $("siteInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("addSite").click();
 });
 
-$("fillBtn").addEventListener("click", async () => {
+// Sends `action` to the active tab's content script and totals the response.
+// Broadcast to all frames via scripting-less messaging: sendMessage without
+// frameId goes to the top frame; iterate frames when the API is available.
+async function runOnPage(action) {
   const p = activeProfile();
-  if (!p) return status("No profile.", "err");
-  readEditor(p); // fill with whatever is on screen, saved or not
+  if (!p) { status("No profile.", "err"); return null; }
+  readEditor(p); // act on whatever is on screen, saved or not
   await persist();
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab?.id) return status("No active tab.", "err");
+  if (!tab?.id) { status("No active tab.", "err"); return null; }
 
-  let totals = { filled: 0, blocked: 0 };
+  const totals = { filled: 0, blocked: 0, preview: 0 };
   let responded = false;
 
-  // Broadcast to all frames via scripting-less messaging: sendMessage without
-  // frameId goes to the top frame; iterate frames when the API is available.
-  const send = (frameId) => new Promise((resolve) => {
-    const opts = frameId != null ? { frameId } : {};
-    chrome.tabs.sendMessage(tab.id, { action: "smartfill", profile: p }, opts, (resp) => {
+  await new Promise((resolve) => {
+    chrome.tabs.sendMessage(tab.id, { action, profile: p }, {}, (resp) => {
       void chrome.runtime.lastError; // swallow frames without content script
       if (resp?.ok) {
         responded = true;
-        totals.filled += resp.result.filled;
-        totals.blocked += resp.result.blocked;
+        totals.filled += resp.result.filled || 0;
+        totals.blocked += resp.result.blocked || 0;
+        totals.preview += resp.result.preview || 0;
       }
       resolve();
     });
   });
 
-  try {
-    // Try all frames if we can enumerate them; otherwise top frame only.
-    await send(null);
-  } catch { /* ignore */ }
-
   if (!responded) {
     status("Couldn't reach the page. Reload the tab and try again.", "err");
-  } else {
-    let msg = `Filled ${totals.filled} field${totals.filled === 1 ? "" : "s"}.`;
-    if (totals.blocked) msg += ` Skipped ${totals.blocked} payment/password field${totals.blocked === 1 ? "" : "s"}.`;
-    status(msg, "ok");
+    return null;
+  }
+  return totals;
+}
+
+$("fillBtn").addEventListener("click", async () => {
+  const t = await runOnPage("smartfill");
+  if (!t) return;
+  let msg = `Filled ${t.filled} field${t.filled === 1 ? "" : "s"}.`;
+  if (t.blocked) msg += ` Skipped ${t.blocked} payment/password field${t.blocked === 1 ? "" : "s"}.`;
+  status(msg, "ok");
+  await refreshPins();
+});
+
+$("previewBtn").addEventListener("click", async () => {
+  const t = await runOnPage("smartfill-preview");
+  if (!t) return;
+  let msg = `Previewing ${t.preview} field${t.preview === 1 ? "" : "s"}.`;
+  if (t.blocked) msg += ` ${t.blocked} blocked.`;
+  status(msg + " Click the page to dismiss.", "ok");
+});
+
+// --- export / import ---
+
+$("exportBtn").addEventListener("click", async () => {
+  const p = activeProfile();
+  if (p) { readEditor(p); await persist(); }
+  const payload = {
+    smartfill: 1,
+    exportedAt: new Date().toISOString(),
+    profiles, autoSites, pins
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `smartfill-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 5000);
+  status(`Exported ${profiles.length} profile${profiles.length === 1 ? "" : "s"}.`, "ok");
+});
+
+$("importBtn").addEventListener("click", () => $("importFile").click());
+
+// Merge rules: profiles dedupe by name, imported wins on conflict;
+// allowlist is a union; pins merge per site with imported winning.
+function mergeImport(data) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.profiles)) {
+    throw new Error("not a SmartFill export");
+  }
+  const clean = data.profiles.filter(p => p && typeof p === "object").map(p => ({
+    label: typeof p.label === "string" ? p.label.trim() : "",
+    fields: (p.fields && typeof p.fields === "object") ? p.fields : {},
+    custom: Array.isArray(p.custom)
+      ? p.custom.filter(c => c && typeof c === "object")
+                .map(c => ({ keywords: String(c.keywords || ""), value: String(c.value || "") }))
+      : []
+  }));
+  if (!clean.length) throw new Error("no profiles in that file");
+
+  let added = 0, replaced = 0;
+  for (const inc of clean) {
+    const existing = profiles.find(p => (p.label || "").trim().toLowerCase() === inc.label.toLowerCase());
+    if (existing) {
+      existing.fields = inc.fields;
+      existing.custom = inc.custom;
+      replaced++;
+    } else {
+      profiles.push({ id: crypto.randomUUID(), ...inc });
+      added++;
+    }
+  }
+  if (Array.isArray(data.autoSites)) {
+    for (const s of data.autoSites) {
+      const base = normalizeSite(s);
+      if (base && !autoSites.includes(base)) autoSites.push(base);
+    }
+  }
+  if (data.pins && typeof data.pins === "object") {
+    for (const [site, map] of Object.entries(data.pins)) {
+      if (!map || typeof map !== "object") continue;
+      pins[site] = Object.assign({}, pins[site], map);
+    }
+  }
+  if (!activeProfileId || !profiles.some(p => p.id === activeProfileId)) {
+    activeProfileId = profiles[0] ? profiles[0].id : null;
+  }
+  return { added, replaced };
+}
+
+$("importFile").addEventListener("change", async (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const { added, replaced } = mergeImport(JSON.parse(await file.text()));
+    await persist();
+    await persistPins();
+    render();
+    renderSites();
+    status(`Imported ${added} new, ${replaced} replaced.`, "ok");
+  } catch (err) {
+    status(`Import failed — ${err.message}`, "err");
   }
 });
 

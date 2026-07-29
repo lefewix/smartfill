@@ -4,7 +4,11 @@ A browser extension for smart form prefill on event signup pages (Weeztix, Organ
 
 ## Features
 
-- **One-click fill** — click the toolbar icon and press **Fill this page**, or use the **Alt+Shift+F** keyboard shortcut
+- **One-click fill** — click the toolbar icon and press **Fill**, or use the **Alt+Shift+F** keyboard shortcut
+- **Preview before filling** — press **Preview** to outline every field that would be filled, and what would go in it, without writing anything
+- **Undo** — a summary chip appears on the page after a fill ("Filled 7 · 1 blocked · Undo") and restores every field to its pre-fill value
+- **Per-site pinning** — once a field is filled on a site, that label-to-profile-field mapping is remembered and wins over scoring on later visits
+- **Export / import** — back up profiles, custom fields, allowlist, and pins as JSON, and merge them back on another machine
 - **Multiple profiles** — maintain separate profiles (e.g. personal, work) and switch between them
 - **Smart field detection** — form fields are classified by their labels, placeholders, names, and `autocomplete` attributes, so no per-site configuration is needed
 - **Custom fields** — define keyword-to-value pairs for site-specific fields (membership IDs, allergies, and other non-standard inputs)
@@ -22,7 +26,7 @@ A browser extension for smart form prefill on event signup pages (Weeztix, Organ
 ## Usage
 
 1. Open a signup form
-2. Click the SmartFill icon and press **Fill this page**, or press **Alt+Shift+F**
+2. Click the SmartFill icon and press **Fill**, or press **Alt+Shift+F** (press **Preview** first to see what would be filled)
 3. Filled fields flash green — review everything, then submit the form yourself
 
 Existing values in a form are never overwritten, and SmartFill never submits a form on your behalf.
@@ -30,6 +34,10 @@ Existing values in a form are never overwritten, and SmartFill never submits a f
 ## How it works
 
 Each visible input, select, and textarea is given a descriptor built from its `<label>`, `placeholder`, `name`, `id`, `aria-label`, `aria-labelledby`, `autocomplete` attribute, and nearby label-like elements. That descriptor is scored against keyword dictionaries per field type (first name, email, date of birth, postal code, and so on); the highest score above a threshold wins. `autocomplete` attributes carry the most weight, since they are authoritative when present.
+
+Keywords match whole words only: "tel" does not match "Hotel name", and "prov" does not match "Insurance provider". Multi-word keywords match a run of consecutive words.
+
+Every field runs through one decision, in a fixed order: **blocklist → never overwrite → per-site pin or custom field → classifier**. Blocked fields and fields that already have a value are settled before anything can write to them.
 
 Additional handling:
 
