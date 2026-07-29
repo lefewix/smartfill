@@ -351,7 +351,7 @@
 
   function flash(el) {
     const prev = el.style.boxShadow;
-    el.style.boxShadow = "0 0 0 2px #FC7643";
+    el.style.boxShadow = "0 0 0 2px #8b5cf6";
     setTimeout(() => { el.style.boxShadow = prev; }, 1200);
   }
 
