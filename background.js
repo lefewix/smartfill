@@ -39,6 +39,17 @@ function cleanMap(map) {
   return out;
 }
 
+// cleanMap caps what ONE message can add; this caps what a site accumulates
+// across every merge, which is the number that actually grows without bound.
+// Later entries win, so the newest pins are the ones kept.
+function capMap(map) {
+  const keys = Object.keys(map);
+  if (keys.length <= MAX_PINS_PER_SITE) return map;
+  const out = Object.create(null);
+  for (const k of keys.slice(keys.length - MAX_PINS_PER_SITE)) out[k] = map[k];
+  return out;
+}
+
 let queue = Promise.resolve();
 function enqueue(fn) {
   const next = queue.then(fn, fn);
@@ -68,7 +79,7 @@ function applyPinOp(msg) {
     case "merge":
       if (!site) return Promise.resolve();
       return mutatePins(pins => {
-        pins[site] = Object.assign({}, pins[site], cleanMap(msg.map));
+        pins[site] = capMap(Object.assign({}, pins[site], cleanMap(msg.map)));
       });
     case "remove":
       if (!site || !Array.isArray(msg.descriptors)) return Promise.resolve();
@@ -90,7 +101,7 @@ function applyPinOp(msg) {
           if (!s) continue;
           const clean = cleanMap(map);
           if (!Object.keys(clean).length) continue;
-          pins[s] = Object.assign({}, pins[s], clean);
+          pins[s] = capMap(Object.assign({}, pins[s], clean));
         }
       });
     default:
@@ -131,7 +142,40 @@ chrome.commands.onCommand.addListener(async (command) => {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
 
-  for (const frameId of await frameIds(tab.id)) {
-    chrome.tabs.sendMessage(tab.id, { action: "smartfill", profile }, { frameId }, () => chrome.runtime.lastError);
-  }
+  // The shortcut has no popup to report into, so the per-frame responses are
+  // totalled onto the toolbar badge. Each frame still shows its own chip, and
+  // that chip's Undo covers that frame's fill.
+  const totals = { filled: 0, skipped: 0, blocked: 0 };
+  await Promise.all((await frameIds(tab.id)).map(frameId => new Promise(resolve => {
+    chrome.tabs.sendMessage(tab.id, { action: "smartfill", profile }, { frameId }, (resp) => {
+      void chrome.runtime.lastError; // frames without a content script never answer
+      if (resp && resp.ok && resp.result) {
+        totals.filled += resp.result.filled || 0;
+        totals.skipped += resp.result.skipped || 0;
+        totals.blocked += resp.result.blocked || 0;
+      }
+      resolve();
+    });
+  })));
+  await showBadge(tab.id, totals);
 });
+
+async function showBadge(tabId, totals) {
+  try {
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#8b5cf6" });
+    await chrome.action.setBadgeText({ tabId, text: String(totals.filled) });
+    await chrome.action.setTitle({
+      tabId,
+      title: `SmartFill — filled ${totals.filled}, skipped ${totals.skipped}, blocked ${totals.blocked}`
+    });
+    setTimeout(() => {
+      chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
+      chrome.action.setTitle({ tabId, title: "SmartFill" }).catch(() => {});
+    }, 5000);
+  } catch { /* tab closed */ }
+}
+
+// Test hook: `module` is undefined in a service worker, so this is inert.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = { applyPinOp, cleanMap, capMap, cleanSite, MAX_PINS_PER_SITE, MAX_SITES };
+}

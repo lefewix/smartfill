@@ -159,17 +159,22 @@
   // Never fill these, no matter what. Payment belongs to the browser/user.
   const BLOCKLIST = [
     "card number", "cardnumber", "card-number", "cc-number", "ccnumber",
-    "cvv", "cvc", "cvv2", "security code", "expiry", "expiration",
-    "password", "passwd", "iban", "routing", "account number", "sin",
+    "cardnum", "name on card", "cardholder", "card holder",
+    "cvv", "cvc", "cvv2", "security code", "sec code", "expiry", "expiration",
+    // "exp" is how most payment forms actually spell it: exp-date, expMonth,
+    // cc-exp-month. It is whole-token-only so "expense"/"experience"/"export"
+    // stay fillable; the concatenated spellings are listed separately.
+    "exp", "expdate", "expmonth", "expyear",
+    "password", "passwd", "pin", "pincode", "iban", "routing", "account number", "sin",
     "social insurance", "social security", "ssn"
   ];
 
   // Blocklist keywords that are short enough to hide inside ordinary words
-  // ("sin" in "business"). These match whole tokens only; everything else on
-  // the blocklist also matches as a substring of a token, because a blocklist
-  // false positive costs a skipped field while a false negative writes a card
-  // number into a form.
-  const BLOCK_TOKEN_EXACT = new Set(["sin", "ssn"]);
+  // ("sin" in "business", "pin" in "shipping", "exp" in "expense"). These match
+  // whole tokens only; everything else on the blocklist also matches as a
+  // substring of a token, because a blocklist false positive costs a skipped
+  // field while a false negative writes a card number into a form.
+  const BLOCK_TOKEN_EXACT = new Set(["sin", "ssn", "pin", "exp"]);
 
   // ---------------------------------------------------------------
   // Word-boundary keyword matching
@@ -280,8 +285,18 @@
     return parts.join(" ");
   }
 
+  function normalizeDesc(parts) {
+    return parts
+      .join(" ")
+      .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // split camelCase: contactEmail → contact email
+      .toLowerCase()
+      .replace(/[_\-\.\[\]:*]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
   function descriptor(el) {
-    return [
+    return normalizeDesc([
       getLabelText(el),
       el.getAttribute("placeholder") || "",
       el.getAttribute("name") || "",
@@ -289,13 +304,21 @@
       el.getAttribute("aria-label") || "",
       el.getAttribute("data-testid") || "",
       el.getAttribute("data-name") || ""
-    ]
-      .join(" ")
-      .replace(/([a-z0-9])([A-Z])/g, "$1 $2") // split camelCase: contactEmail → contact email
-      .toLowerCase()
-      .replace(/[_\-\.\[\]:*]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
+    ]);
+  }
+
+  // Pins are keyed by this, NOT by the full descriptor: React's useId and Radix
+  // emit a fresh id per render (":r3:", ":r7q:"), and generated test ids move
+  // too, so a descriptor-keyed pin never matches again on the sites this
+  // extension targets — it only grows the stored map. Label text plus `name`
+  // is what actually survives a re-render.
+  function pinKey(el) {
+    const k = normalizeDesc([
+      getLabelText(el),
+      el.getAttribute("aria-label") || "",
+      el.getAttribute("name") || ""
+    ]);
+    return k.length ? k.slice(0, 300) : null;
   }
 
   // Squashed form of a keyword: "card number" → "cardnumber", so a
@@ -510,12 +533,18 @@
     const [y, m, d] = iso.split("-");
     if (!y || !m || !d) return iso;
     if ((el.type || "").toLowerCase() === "date") return iso;
-    const hint = (descriptor(el));
-    if (hint.includes("mm/dd")) return `${m}/${d}/${y}`;
-    if (hint.includes("dd/mm")) return `${d}/${m}/${y}`;
-    if (hint.includes("yyyy-mm-dd") || hint.includes("yyyy mm dd")) return iso;
-    // Default to the common North American format for text inputs
-    return `${m}/${d}/${y}`;
+    // Read the raw attributes, not the normalized descriptor: the separators
+    // ("mm/dd" vs "yyyy-mm-dd") are exactly what distinguishes the formats.
+    const hint = [
+      el.getAttribute("placeholder") || "", el.getAttribute("title") || "",
+      el.getAttribute("aria-label") || "", getLabelText(el)
+    ].join(" ").toLowerCase();
+    if (/y{2,4}\s*[-\/. ]\s*mm/.test(hint)) return iso;
+    if (/mm\s*[-\/. ]\s*dd/.test(hint)) return `${m}/${d}/${y}`;
+    if (/dd\s*[-\/. ]\s*mm/.test(hint)) return `${d}/${m}/${y}`;
+    // No hint: guessing mm/dd/yyyy silently turns 7 March into 3 July on every
+    // form outside the US. ISO is the one format that cannot be misread.
+    return iso;
   }
 
   // Ordered list of value representations to try for a field.
@@ -584,21 +613,57 @@
     return pool[0];
   }
 
+  // Custom keywords bypass scoring entirely — first match wins — so a keyword
+  // that is too generic ("code", "name", "id") silently hijacks whatever field
+  // it touches first. Require either two words or a reasonably specific one.
+  const CUSTOM_KW_MIN_CHARS = 5;
+  function customKeywordOk(kw) {
+    const toks = tokenize(kw);
+    if (!toks.length) return false;
+    if (toks.length >= 2) return true;
+    return toks[0].length >= CUSTOM_KW_MIN_CHARS;
+  }
+
+  function customKeywords(c) {
+    return (c && c.keywords || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
+  }
+
   function matchCustom(desc, profile) {
     const toks = expandTokens(tokenize(desc));
     for (const c of (profile && profile.custom) || []) {
-      const kws = (c.keywords || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
+      const kws = customKeywords(c).filter(customKeywordOk);
       if (kws.some(k => hasKeyword(toks, k))) return c.value;
     }
     return null;
   }
 
+  // Honeypots. Spam traps on signup platforms are real fields named `email` /
+  // `name` / `nickname` that are hidden with opacity or by being parked far
+  // off-screen — both keep a non-zero rect, so a rect/visibility check alone
+  // walks straight into them and silently fails the signup.
+  const OFFSCREEN_MARGIN = 2000;
   function visible(el) {
     if (el.disabled || el.readOnly) return false;
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return false;
+
     const cs = getComputedStyle(el);
-    return cs.visibility !== "hidden" && cs.display !== "none";
+    if (cs.visibility === "hidden" || cs.display === "none") return false;
+    if (cs.opacity === "0") return false;
+    // A transparent wrapper hides its children just as effectively.
+    let n = el.parentElement, depth = 0;
+    while (n && depth < 4) {
+      const pcs = getComputedStyle(n);
+      if (pcs && (pcs.opacity === "0" || pcs.visibility === "hidden")) return false;
+      n = n.parentElement; depth++;
+    }
+
+    // Horizontal only: a rect above the viewport just means the page is
+    // scrolled down, but nothing legitimate sits at left:-9999px.
+    const vw = window.innerWidth || document.documentElement.clientWidth || 0;
+    if (r.right < -50) return false;
+    if (vw && r.left > vw + OFFSCREEN_MARGIN) return false;
+    return true;
   }
 
   // ---------------------------------------------------------------
@@ -613,14 +678,21 @@
     const customVal = matchCustom(ctx.desc, ctx.profile);
     if (customVal != null && customVal !== "") return { action: "custom", value: customVal };
 
-    // A per-site pin beats scoring.
-    if (ctx.pinnedType) return { action: "fill", type: ctx.pinnedType };
-
     const cls = ctx.cls;
+    // If the form has proper first/last fields, don't also stuff fullName into
+    // some weakly-matched "name" field like "event name". This runs BEFORE the
+    // pin is consulted: a pin is a memory of an earlier fill, and a fill the
+    // demotion guard would reject must not come back through the pin.
+    const demoted = (type) =>
+      type === "fullName" && ctx.hasSplitName && !(cls && cls.type === "fullName" && cls.score >= 8);
+
+    // A per-site pin beats scoring, but not the guards above it.
+    if (ctx.pinnedType && !demoted(ctx.pinnedType)) {
+      return { action: "fill", type: ctx.pinnedType, pinned: true };
+    }
+
     if (!cls) return { action: "skip" };
-    // If the form has proper first/last fields, don't also stuff fullName
-    // into some weakly-matched "name" field like "event name".
-    if (cls.type === "fullName" && ctx.hasSplitName && cls.score < 8) return { action: "skip" };
+    if (demoted(cls.type)) return { action: "skip" };
     return { action: "fill", type: cls.type };
   }
 
@@ -637,6 +709,8 @@
       const blocked = isBlocked(desc, el);
       return {
         el, desc, blocked,
+        key: pinKey(el),
+        hasValue: !!(el_value(el) && el_value(el).trim() !== ""),
         cls: blocked ? null : classify(el, desc)
       };
     });
@@ -648,8 +722,8 @@
         desc: r.desc,
         cls: r.cls,
         blocked: r.blocked,
-        hasValue: !!(el_value(r.el) && el_value(r.el).trim() !== ""),
-        pinnedType: (pins && r.desc && pins[r.desc]) || null,
+        hasValue: r.hasValue,
+        pinnedType: (pins && r.key && pins[r.key]) || null,
         profile,
         hasSplitName
       });
@@ -674,6 +748,10 @@
   // ---------------------------------------------------------------
   // Main fill pass
   // ---------------------------------------------------------------
+  // Scores at or just above THRESHOLD are guesses; they get filled (the user
+  // can see and undo that) but are never learned as a pin.
+  const PIN_MIN_SCORE = THRESHOLD + 2;
+
   function fillPage(profile, pins) {
     const { rows, total } = survey(profile, pins);
     let filled = 0, skipped = 0, blocked = 0;
@@ -707,7 +785,13 @@
       if (ok) {
         filled++;
         snapshot.push({ el, prev, select: el.tagName === "SELECT" });
-        if (d.action === "fill" && r.desc) learned[r.desc] = d.type;
+        // Only pin a confident, freshly classified match. A pin is written
+        // without confirmation and replayed forever, so a barely-above-
+        // threshold guess is exactly the one that must not become permanent.
+        if (d.action === "fill" && !d.pinned && r.key &&
+            r.cls && r.cls.type === d.type && r.cls.score >= PIN_MIN_SCORE) {
+          learned[r.key] = d.type;
+        }
       } else {
         skipped++;
       }
@@ -745,6 +829,7 @@
     .chip button:focus-visible { outline: 2px solid #8b5cf6; outline-offset: 2px; }
     .box { position: fixed; border: 2px solid #8b5cf6; border-radius: 4px; pointer-events: none; }
     .box.blocked { border-color: #4a4857; border-style: dashed; }
+    .box.skip { border-color: #3d3b49; border-style: dotted; }
     .tag {
       position: fixed; pointer-events: none; max-width: 220px; overflow: hidden;
       white-space: nowrap; text-overflow: ellipsis;
@@ -753,6 +838,7 @@
       color: #c9bdf7; box-shadow: 0 4px 16px rgba(8,5,20,.45);
     }
     .tag.blocked { color: #8a879d; }
+    .tag.skip { color: #8a879d; }
   `;
 
   let uiRoot = null;
@@ -774,45 +860,93 @@
     uiRoot.querySelectorAll("." + kind).forEach(n => n.remove());
   }
 
-  const CHIP_MS = 8000;
+  const CHIP_MS = 20000;
   const PREVIEW_MS = 8000;
 
+  // "Filled 7 · 2 skipped · 1 blocked" — the skipped count is the signal that
+  // tells a user there is something left to add a custom field for.
+  function chipSummary(result) {
+    const parts = [`Filled ${result.filled || 0}`];
+    if (result.skipped) parts.push(`${result.skipped} skipped`);
+    if (result.blocked) parts.push(`${result.blocked} blocked`);
+    return parts.join(" · ");
+  }
+
+  // A multi-step checkout fills in several passes. Each pass used to replace
+  // the chip and throw away the previous snapshot, so Undo only ever reached
+  // the last pass. Passes now accumulate into one chip while it is on screen.
+  let chipState = null;
+  let chipTimer = null;
+
   function showChip(result) {
-    clearUi("chip");
     const root = ui();
-    const chip = document.createElement("div");
-    chip.className = "chip";
-
-    const filled = document.createElement("span");
-    const n1 = document.createElement("span");
-    n1.className = "n";
-    n1.textContent = String(result.filled);
-    filled.append("Filled ", n1);
-    chip.appendChild(filled);
-
-    if (result.blocked) {
-      const sep = document.createElement("span");
-      sep.className = "sep"; sep.textContent = "·";
-      const b = document.createElement("span");
-      b.className = "muted";
-      const n2 = document.createElement("span");
-      n2.className = "n"; n2.textContent = String(result.blocked);
-      b.append(n2, " blocked");
-      chip.append(sep, b);
+    const live = chipState && chipState.el && chipState.el.isConnected;
+    if (live) {
+      chipState.filled += result.filled || 0;
+      chipState.skipped += result.skipped || 0;
+      chipState.blocked += result.blocked || 0;
+      chipState.snapshot = chipState.snapshot.concat(result.snapshot || []);
+      Object.assign(chipState.learned, result.learned || {});
+    } else {
+      chipState = {
+        filled: result.filled || 0,
+        skipped: result.skipped || 0,
+        blocked: result.blocked || 0,
+        snapshot: (result.snapshot || []).slice(),
+        learned: Object.assign({}, result.learned),
+        el: null
+      };
     }
 
-    const sep2 = document.createElement("span");
-    sep2.className = "sep"; sep2.textContent = "·";
+    clearUi("chip");
+    const chip = document.createElement("div");
+    chip.className = "chip";
+    chipState.el = chip;
+
+    const num = (v) => {
+      const n = document.createElement("span");
+      n.className = "n";
+      n.textContent = String(v);
+      return n;
+    };
+    const dot = () => {
+      const s = document.createElement("span");
+      s.className = "sep"; s.textContent = "·";
+      return s;
+    };
+    const count = (v, word) => {
+      const s = document.createElement("span");
+      s.className = "muted";
+      s.append(num(v), " " + word);
+      return s;
+    };
+
+    const filled = document.createElement("span");
+    filled.append("Filled ", num(chipState.filled));
+    chip.appendChild(filled);
+    if (chipState.skipped) chip.append(dot(), count(chipState.skipped, "skipped"));
+    if (chipState.blocked) chip.append(dot(), count(chipState.blocked, "blocked"));
+
     const undo = document.createElement("button");
     undo.textContent = "Undo";
     undo.addEventListener("click", () => {
-      undoFill(result);
+      undoFill(chipState);
+      chipState = null;
+      clearTimeout(chipTimer);
       chip.remove();
     });
-    chip.append(sep2, undo);
+    chip.append(dot(), undo);
+
+    // Pause the countdown while the user is reading or tabbing through it.
+    const dismiss = () => { chip.remove(); if (chipState && chipState.el === chip) chipState = null; };
+    const arm = () => { clearTimeout(chipTimer); chipTimer = setTimeout(dismiss, CHIP_MS); };
+    chip.addEventListener("mouseenter", () => clearTimeout(chipTimer));
+    chip.addEventListener("focusin", () => clearTimeout(chipTimer));
+    chip.addEventListener("mouseleave", arm);
+    chip.addEventListener("focusout", arm);
 
     root.appendChild(chip);
-    setTimeout(() => chip.remove(), CHIP_MS);
+    arm();
   }
 
   const PREVIEW_LABELS = {
@@ -830,30 +964,40 @@
     clearUi("tag");
     const root = ui();
     const tracked = [];
-    let shown = 0, blocked = 0;
+    let shown = 0, blocked = 0, skipped = 0;
 
     for (const r of rows) {
       const d = r.decision;
-      const isBlockedRow = d.action === "blocked";
-      let text = null;
+      let kind = "fill", text = null;
 
-      if (!isBlockedRow) {
-        const cands = valuesFor(r, profile);
-        if (!cands.length) continue;
-        const label = d.action === "custom" ? "custom" : (PREVIEW_LABELS[d.type] || d.type);
-        text = `${label}: ${cands[0]}`;
-      } else {
+      if (d.action === "blocked") {
+        kind = "blocked";
         text = "blocked — never filled";
+      } else if (d.action === "skip" && r.hasValue) {
+        continue; // already has a value; nothing to show and nothing to fix
+      } else {
+        const cands = valuesFor(r, profile);
+        if (!cands.length) {
+          // Surfacing these is the whole point of the README's "add a custom
+          // field using its label as the keyword" advice.
+          kind = "skip";
+          text = "no match";
+        } else {
+          const label = d.action === "custom" ? "custom" : (PREVIEW_LABELS[d.type] || d.type);
+          text = `${label}: ${cands[0]}`;
+        }
       }
 
       const box = document.createElement("div");
-      box.className = "box" + (isBlockedRow ? " blocked" : "");
+      box.className = "box" + (kind === "fill" ? "" : " " + kind);
       const tag = document.createElement("div");
-      tag.className = "tag" + (isBlockedRow ? " blocked" : "");
+      tag.className = "tag" + (kind === "fill" ? "" : " " + kind);
       tag.textContent = text;
       root.append(box, tag);
       tracked.push({ el: r.el, box, tag });
-      isBlockedRow ? blocked++ : shown++;
+      if (kind === "blocked") blocked++;
+      else if (kind === "skip") skipped++;
+      else shown++;
     }
 
     const position = () => {
@@ -881,7 +1025,7 @@
     document.addEventListener("click", stop, true);
     const timer = setTimeout(stop, PREVIEW_MS);
 
-    return { preview: shown, blocked, total: rows.length };
+    return { preview: shown, skipped, blocked, total: rows.length };
   }
 
   // ---------------------------------------------------------------
@@ -956,7 +1100,7 @@
           const pins = await loadPins();
           const result = fillPage(msg.profile, pins);
           savePins(result.learned);
-          if (result.filled || result.blocked) showChip(result);
+          if (result.filled || result.blocked || result.skipped) showChip(result);
           sendResponse({
             ok: true,
             result: { filled: result.filled, skipped: result.skipped, blocked: result.blocked, total: result.total }
@@ -1033,7 +1177,10 @@
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
       tokenize, hasKeyword, expandTokens, isBlockedDesc, classifyDesc, matchCustom,
-      decide, baseDomain, descriptor, fillPage, savePins, undoFill, loadPins
+      customKeywordOk, decide, baseDomain, descriptor, pinKey, visible,
+      fillPage, previewPage, chipSummary, showChip, chipState: () => chipState,
+      savePins, undoFill, loadPins,
+      THRESHOLD, PIN_MIN_SCORE
     };
   }
 })();

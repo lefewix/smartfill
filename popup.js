@@ -210,6 +210,33 @@ function render() {
   renderCustom(p);
 }
 
+// A custom keyword bypasses scoring entirely and the first match wins, so a
+// one-word keyword like "code" lands in whatever field it reaches first
+// ("Postal code", "Discount code"). Content script and popup must agree on
+// what counts as specific enough — keep in sync with customKeywordOk there.
+const CUSTOM_KW_MIN_CHARS = 5;
+const BLOCKLIST_WORDS = [
+  "card", "cardnumber", "cvv", "cvc", "exp", "expiry", "expiration", "password",
+  "pin", "iban", "routing", "sin", "ssn", "security code"
+];
+
+function keywordWarning(raw) {
+  const kws = (raw || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
+  const weak = [], blocked = [];
+  for (const k of kws) {
+    const toks = k.split(/[^a-z0-9]+/).filter(Boolean);
+    if (toks.length < 2 && (toks[0] || "").length < CUSTOM_KW_MIN_CHARS) weak.push(k);
+    if (toks.some(t => BLOCKLIST_WORDS.includes(t))) blocked.push(k);
+  }
+  if (blocked.length) {
+    return `“${blocked[0]}” overlaps a blocked payment/credential term — that field is never filled.`;
+  }
+  if (weak.length) {
+    return `“${weak[0]}” is too generic and is ignored — use two words or ${CUSTOM_KW_MIN_CHARS}+ characters.`;
+  }
+  return "";
+}
+
 function renderCustom(p) {
   const list = $("customList");
   list.innerHTML = "";
@@ -217,10 +244,18 @@ function renderCustom(p) {
     const row = document.createElement("div");
     row.className = "custom-row";
 
+    const warn = document.createElement("div");
+    warn.className = "kw-warn";
+
     const kw = document.createElement("input");
     kw.placeholder = "keywords, e.g. bandai id, membership";
     kw.value = c.keywords || "";
-    kw.addEventListener("input", () => { p.custom[i].keywords = kw.value; });
+    const showWarn = () => {
+      warn.textContent = keywordWarning(kw.value);
+      warn.hidden = !warn.textContent;
+    };
+    showWarn();
+    kw.addEventListener("input", () => { p.custom[i].keywords = kw.value; showWarn(); });
 
     const val = document.createElement("input");
     val.placeholder = "value";
@@ -233,7 +268,7 @@ function renderCustom(p) {
     del.addEventListener("click", () => { p.custom.splice(i, 1); renderCustom(p); });
 
     row.append(kw, val, del);
-    list.appendChild(row);
+    list.append(row, warn);
   }
 }
 
@@ -345,7 +380,7 @@ async function runOnPage(action) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) { status("No active tab.", "err"); return null; }
 
-  const totals = { filled: 0, blocked: 0, preview: 0 };
+  const totals = { filled: 0, skipped: 0, blocked: 0, preview: 0 };
   let responded = false;
 
   await Promise.all((await frameIds(tab.id)).map(frameId => new Promise((resolve) => {
@@ -354,6 +389,7 @@ async function runOnPage(action) {
       if (resp?.ok) {
         responded = true;
         totals.filled += resp.result.filled || 0;
+        totals.skipped += resp.result.skipped || 0;
         totals.blocked += resp.result.blocked || 0;
         totals.preview += resp.result.preview || 0;
       }
@@ -372,7 +408,10 @@ $("fillBtn").addEventListener("click", async () => {
   const t = await runOnPage("smartfill");
   if (!t) return;
   let msg = `Filled ${t.filled} field${t.filled === 1 ? "" : "s"}.`;
-  if (t.blocked) msg += ` Skipped ${t.blocked} payment/password field${t.blocked === 1 ? "" : "s"}.`;
+  // The skipped count is the actionable one: those are the fields a custom
+  // field would pick up.
+  if (t.skipped) msg += ` ${t.skipped} unmatched — add a custom field for them.`;
+  if (t.blocked) msg += ` ${t.blocked} payment/password field${t.blocked === 1 ? "" : "s"} blocked.`;
   status(msg, "ok");
   await refreshPins();
 });
@@ -381,6 +420,7 @@ $("previewBtn").addEventListener("click", async () => {
   const t = await runOnPage("smartfill-preview");
   if (!t) return;
   let msg = `Previewing ${t.preview} field${t.preview === 1 ? "" : "s"}.`;
+  if (t.skipped) msg += ` ${t.skipped} unmatched.`;
   if (t.blocked) msg += ` ${t.blocked} blocked.`;
   status(msg + " Click the page to dismiss.", "ok");
 });
@@ -503,16 +543,21 @@ function mergeImport(data) {
     added++;
   }
 
+  // The allowlist is NOT unioned here. Auto-fill writes into pages without the
+  // user asking, so turning it on for a domain must stay an explicit choice —
+  // an imported file should not be able to make that choice for them. The
+  // caller confirms the list first.
+  const sites = [];
   if (Array.isArray(data.autoSites)) {
     for (const s of data.autoSites.slice(0, LIMITS.sites)) {
       const base = normalizeSite(typeof s === "string" ? s : "");
-      if (base && !autoSites.includes(base)) autoSites.push(base);
+      if (base && !autoSites.includes(base) && !sites.includes(base)) sites.push(base);
     }
   }
   if (!activeProfileId || !profiles.some(p => p.id === activeProfileId)) {
     activeProfileId = profiles[0] ? profiles[0].id : null;
   }
-  return { added, renamed, pins: cleanPins(data.pins) };
+  return { added, renamed, sites, pins: cleanPins(data.pins) };
 }
 
 $("importFile").addEventListener("change", async (e) => {
@@ -520,7 +565,15 @@ $("importFile").addEventListener("change", async (e) => {
   e.target.value = "";
   if (!file) return;
   try {
-    const { added, renamed, pins: incoming } = mergeImport(JSON.parse(await file.text()));
+    const { added, renamed, sites, pins: incoming } = mergeImport(JSON.parse(await file.text()));
+    let sitesAdded = 0;
+    if (sites.length && confirm(
+      `Also turn auto-fill ON for ${sites.length} imported domain${sites.length === 1 ? "" : "s"}?\n\n` +
+      sites.slice(0, 12).join("\n") + (sites.length > 12 ? `\n…and ${sites.length - 12} more` : "") +
+      "\n\nAuto-fill writes into forms on these domains without you asking."
+    )) {
+      for (const s of sites) if (!autoSites.includes(s)) { autoSites.push(s); sitesAdded++; }
+    }
     await persist();
     if (Object.keys(incoming).length) await pinOp({ op: "import", pins: incoming });
     await refreshPins();
@@ -528,7 +581,8 @@ $("importFile").addEventListener("change", async (e) => {
     renderSites();
     status(
       `Imported ${added} profile${added === 1 ? "" : "s"}` +
-      (renamed ? `, ${renamed} renamed to avoid a collision.` : "."),
+      (renamed ? `, ${renamed} renamed to avoid a collision.` : ".") +
+      (sitesAdded ? ` Auto-fill enabled on ${sitesAdded} domain${sitesAdded === 1 ? "" : "s"}.` : ""),
       "ok"
     );
   } catch (err) {
