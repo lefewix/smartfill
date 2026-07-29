@@ -69,8 +69,11 @@ function persist() {
   return chrome.storage.local.set({ profiles, activeProfileId, autoSites });
 }
 
-function persistPins() {
-  return chrome.storage.local.set({ pins });
+// Pins are written by the background worker only — it serializes writes from
+// every frame and from here, always against a freshly read object. Sending a
+// whole copy of `pins` from the popup would clobber whatever a fill just wrote.
+function pinOp(msg) {
+  return chrome.runtime.sendMessage(Object.assign({ action: "pins" }, msg));
 }
 
 async function refreshPins() {
@@ -116,14 +119,20 @@ function renderSites() {
 }
 
 // Sites where a previous fill pinned descriptor → profile field mappings.
+// Click a site to inspect its individual pins and remove them one at a time.
+let openPinSite = null;
+
 function renderPins() {
   const head = $("pinHead");
   const list = $("pinList");
+  const detail = $("pinDetail");
   list.innerHTML = "";
+  detail.innerHTML = "";
 
   const sites = Object.keys(pins).filter(s => Object.keys(pins[s] || {}).length).sort();
   if (!sites.length) {
     head.textContent = "No pinned fields yet";
+    openPinSite = null;
     return;
   }
   head.textContent = "";
@@ -134,18 +143,49 @@ function renderPins() {
 
   for (const s of sites) {
     const chip = document.createElement("span");
-    chip.className = "chip";
-    chip.textContent = `${s} ${Object.keys(pins[s]).length} `;
+    chip.className = "chip" + (s === openPinSite ? " on" : "");
+
+    const name = document.createElement("button");
+    name.className = "chip-label";
+    name.textContent = `${s} ${Object.keys(pins[s]).length}`;
+    name.title = `Show pinned fields on ${s}`;
+    name.addEventListener("click", () => {
+      openPinSite = openPinSite === s ? null : s;
+      renderPins();
+    });
+
     const x = document.createElement("button");
     x.textContent = "✕";
     x.title = `Clear pinned fields for ${s}`;
     x.addEventListener("click", async () => {
-      delete pins[s];
-      await persistPins();
-      renderPins();
+      if (openPinSite === s) openPinSite = null;
+      await pinOp({ op: "clearSite", site: s });
+      await refreshPins();
     });
-    chip.appendChild(x);
+    chip.append(name, x);
     list.appendChild(chip);
+  }
+
+  if (!openPinSite || !pins[openPinSite]) return;
+  for (const [desc, type] of Object.entries(pins[openPinSite]).sort()) {
+    const row = document.createElement("div");
+    row.className = "pinrow";
+    const d = document.createElement("span");
+    d.className = "pindesc";
+    d.textContent = desc;
+    d.title = desc;
+    const t = document.createElement("span");
+    t.className = "pintype";
+    t.textContent = type;
+    const x = document.createElement("button");
+    x.textContent = "✕";
+    x.title = "Remove this pin";
+    x.addEventListener("click", async () => {
+      await pinOp({ op: "remove", site: openPinSite, descriptors: [desc] });
+      await refreshPins();
+    });
+    row.append(d, t, x);
+    detail.appendChild(row);
   }
 }
 
@@ -283,9 +323,19 @@ $("siteInput").addEventListener("keydown", (e) => {
   if (e.key === "Enter") $("addSite").click();
 });
 
-// Sends `action` to the active tab's content script and totals the response.
-// Broadcast to all frames via scripting-less messaging: sendMessage without
-// frameId goes to the top frame; iterate frames when the API is available.
+// Sends `action` to every frame of the active tab (signup forms often live in
+// an iframe) and totals the responses. Frames without a content script simply
+// never answer.
+async function frameIds(tabId) {
+  try {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    const ids = (frames || []).map(f => f.frameId);
+    return ids.length ? ids : [0];
+  } catch {
+    return [0];
+  }
+}
+
 async function runOnPage(action) {
   const p = activeProfile();
   if (!p) { status("No profile.", "err"); return null; }
@@ -298,8 +348,8 @@ async function runOnPage(action) {
   const totals = { filled: 0, blocked: 0, preview: 0 };
   let responded = false;
 
-  await new Promise((resolve) => {
-    chrome.tabs.sendMessage(tab.id, { action, profile: p }, {}, (resp) => {
+  await Promise.all((await frameIds(tab.id)).map(frameId => new Promise((resolve) => {
+    chrome.tabs.sendMessage(tab.id, { action, profile: p }, { frameId }, (resp) => {
       void chrome.runtime.lastError; // swallow frames without content script
       if (resp?.ok) {
         responded = true;
@@ -309,7 +359,7 @@ async function runOnPage(action) {
       }
       resolve();
     });
-  });
+  })));
 
   if (!responded) {
     status("Couldn't reach the page. Reload the tab and try again.", "err");
@@ -356,50 +406,113 @@ $("exportBtn").addEventListener("click", async () => {
 
 $("importBtn").addEventListener("click", () => $("importFile").click());
 
-// Merge rules: profiles dedupe by name, imported wins on conflict;
-// allowlist is a union; pins merge per site with imported winning.
+// --- import validation ---
+
+const PIN_TYPES = new Set([
+  "firstName", "lastName", "fullName", "email", "emailConfirm", "phone", "dob",
+  "dobMonth", "dobDay", "dobYear", "address", "address2", "city", "region",
+  "postal", "country", "company", "bandaiName", "bandaiId", "discord"
+]);
+
+const LIMITS = {
+  profiles: 50, value: 1000, label: 80, custom: 100, sites: 200,
+  pinsPerSite: 200, descriptor: 300
+};
+
+const unsafeKey = (k) => k === "__proto__" || k === "constructor" || k === "prototype";
+const str = (v, max) => (typeof v === "string" ? v : "").slice(0, max);
+
+// Field values must be strings; objects/arrays/numbers are dropped rather than
+// stored, so nothing can smuggle a non-string into a form field later.
+function cleanFields(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  for (const f of FIELDS) {
+    if (!Object.prototype.hasOwnProperty.call(raw, f)) continue;
+    const v = raw[f];
+    if (typeof v !== "string") continue;
+    out[f] = v.trim().slice(0, LIMITS.value);
+  }
+  return out;
+}
+
+function cleanPins(raw) {
+  const out = {};
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return out;
+  let sites = 0;
+  for (const [rawSite, map] of Object.entries(raw)) {
+    if (unsafeKey(rawSite) || !map || typeof map !== "object" || Array.isArray(map)) continue;
+    const site = normalizeSite(rawSite);
+    if (!site || ++sites > LIMITS.sites) continue;
+    const clean = {};
+    let n = 0;
+    for (const [desc, type] of Object.entries(map)) {
+      if (unsafeKey(desc) || !desc || desc.length > LIMITS.descriptor) continue;
+      if (typeof type !== "string" || !PIN_TYPES.has(type)) continue;
+      clean[desc] = type;
+      if (++n >= LIMITS.pinsPerSite) break;
+    }
+    if (n) out[site] = Object.assign({}, out[site], clean);
+  }
+  return out;
+}
+
+// A label that is free, given what's already there plus what this import added.
+function uniqueLabel(label, taken) {
+  const base = label || "Imported profile";
+  if (!taken.has(base.toLowerCase())) return base;
+  const suffixed = `${base} (imported)`;
+  if (!taken.has(suffixed.toLowerCase())) return suffixed;
+  for (let i = 2; ; i++) {
+    const n = `${base} (imported ${i})`;
+    if (!taken.has(n.toLowerCase())) return n;
+  }
+}
+
+// Merge rules: imported profiles are ALWAYS added as new entries — an import
+// never overwrites or deletes existing data. Colliding or unnamed labels get a
+// suffix. The allowlist is a union; pins are merged by the background worker.
 function mergeImport(data) {
   if (!data || typeof data !== "object" || !Array.isArray(data.profiles)) {
     throw new Error("not a SmartFill export");
   }
-  const clean = data.profiles.filter(p => p && typeof p === "object").map(p => ({
-    label: typeof p.label === "string" ? p.label.trim() : "",
-    fields: (p.fields && typeof p.fields === "object") ? p.fields : {},
+  if (data.profiles.length > LIMITS.profiles) {
+    throw new Error(`too many profiles (${data.profiles.length}, max ${LIMITS.profiles})`);
+  }
+  const clean = data.profiles.filter(p => p && typeof p === "object" && !Array.isArray(p)).map(p => ({
+    label: str(p.label, LIMITS.label).trim(),
+    fields: cleanFields(p.fields),
     custom: Array.isArray(p.custom)
-      ? p.custom.filter(c => c && typeof c === "object")
-                .map(c => ({ keywords: String(c.keywords || ""), value: String(c.value || "") }))
+      ? p.custom.filter(c => c && typeof c === "object" && !Array.isArray(c))
+                .slice(0, LIMITS.custom)
+                .map(c => ({
+                  keywords: str(c.keywords, LIMITS.value),
+                  value: str(c.value, LIMITS.value)
+                }))
       : []
   }));
   if (!clean.length) throw new Error("no profiles in that file");
 
-  let added = 0, replaced = 0;
+  const taken = new Set(profiles.map(p => (p.label || "").trim().toLowerCase()));
+  let added = 0, renamed = 0;
   for (const inc of clean) {
-    const existing = profiles.find(p => (p.label || "").trim().toLowerCase() === inc.label.toLowerCase());
-    if (existing) {
-      existing.fields = inc.fields;
-      existing.custom = inc.custom;
-      replaced++;
-    } else {
-      profiles.push({ id: crypto.randomUUID(), ...inc });
-      added++;
-    }
+    const label = uniqueLabel(inc.label, taken);
+    if (label !== inc.label) renamed++;
+    taken.add(label.toLowerCase());
+    profiles.push({ id: crypto.randomUUID(), ...inc, label });
+    added++;
   }
+
   if (Array.isArray(data.autoSites)) {
-    for (const s of data.autoSites) {
-      const base = normalizeSite(s);
+    for (const s of data.autoSites.slice(0, LIMITS.sites)) {
+      const base = normalizeSite(typeof s === "string" ? s : "");
       if (base && !autoSites.includes(base)) autoSites.push(base);
-    }
-  }
-  if (data.pins && typeof data.pins === "object") {
-    for (const [site, map] of Object.entries(data.pins)) {
-      if (!map || typeof map !== "object") continue;
-      pins[site] = Object.assign({}, pins[site], map);
     }
   }
   if (!activeProfileId || !profiles.some(p => p.id === activeProfileId)) {
     activeProfileId = profiles[0] ? profiles[0].id : null;
   }
-  return { added, replaced };
+  return { added, renamed, pins: cleanPins(data.pins) };
 }
 
 $("importFile").addEventListener("change", async (e) => {
@@ -407,15 +520,30 @@ $("importFile").addEventListener("change", async (e) => {
   e.target.value = "";
   if (!file) return;
   try {
-    const { added, replaced } = mergeImport(JSON.parse(await file.text()));
+    const { added, renamed, pins: incoming } = mergeImport(JSON.parse(await file.text()));
     await persist();
-    await persistPins();
+    if (Object.keys(incoming).length) await pinOp({ op: "import", pins: incoming });
+    await refreshPins();
     render();
     renderSites();
-    status(`Imported ${added} new, ${replaced} replaced.`, "ok");
+    status(
+      `Imported ${added} profile${added === 1 ? "" : "s"}` +
+      (renamed ? `, ${renamed} renamed to avoid a collision.` : "."),
+      "ok"
+    );
   } catch (err) {
     status(`Import failed — ${err.message}`, "err");
   }
 });
 
 load();
+
+// Test hook: lets a Node harness exercise import merging without a browser.
+// `module` is undefined in the popup, so this is inert in Chrome.
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = {
+    mergeImport, normalizeSite, cleanFields, cleanPins,
+    state: () => ({ profiles, autoSites, pins, activeProfileId }),
+    setProfiles: (p) => { profiles = p; }
+  };
+}

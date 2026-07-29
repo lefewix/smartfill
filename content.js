@@ -11,7 +11,9 @@
   //
   // Keywords match whole words only (see hasKeyword). "tel" will not
   // match "hotel", "prov" will not match "provider". Multi-word
-  // keywords match a run of consecutive words.
+  // keywords match a run of consecutive words. Concatenated attributes
+  // ("streetaddress") are split into known words first (see expandTokens).
+  // The BLOCKLIST plays by looser rules on purpose — see isBlockedDesc.
   // ---------------------------------------------------------------
   const THRESHOLD = 3;
 
@@ -162,11 +164,25 @@
     "social insurance", "social security", "ssn"
   ];
 
+  // Blocklist keywords that are short enough to hide inside ordinary words
+  // ("sin" in "business"). These match whole tokens only; everything else on
+  // the blocklist also matches as a substring of a token, because a blocklist
+  // false positive costs a skipped field while a false negative writes a card
+  // number into a form.
+  const BLOCK_TOKEN_EXACT = new Set(["sin", "ssn"]);
+
   // ---------------------------------------------------------------
   // Word-boundary keyword matching
   // ---------------------------------------------------------------
+  // Splits on non-alphanumerics and on letter↔digit boundaries, so
+  // "cardnumber2" → ["cardnumber", "2"] and "1stName" → ["1", "st", "name"].
   function tokenize(s) {
-    return String(s || "").toLowerCase().split(/[^a-z0-9]+/).filter(Boolean);
+    return String(s || "")
+      .toLowerCase()
+      .replace(/([a-z])([0-9])/g, "$1 $2")
+      .replace(/([0-9])([a-z])/g, "$1 $2")
+      .split(/[^a-z0-9]+/)
+      .filter(Boolean);
   }
 
   const KW_CACHE = new Map();
@@ -186,6 +202,54 @@
       return true;
     }
     return false;
+  }
+
+  // ---------------------------------------------------------------
+  // Concatenated-word handling for the FIELD dictionaries.
+  //
+  // Attributes like name="streetaddress" or name="cellphone" arrive as a
+  // single token, so whole-token matching alone would miss them. A token that
+  // isn't a known word is split once into two known words when possible; the
+  // original token is kept too (after a separator, so it can't form a bogus
+  // consecutive run). Unknown compounds like "hotelname" never split, which is
+  // what keeps "hotel name" from classifying as a full name.
+  // ---------------------------------------------------------------
+  const CONCAT_MODIFIERS = [
+    "home", "work", "billing", "shipping", "mailing", "personal", "business",
+    "primary", "secondary", "contact", "main", "alternate", "current", "new",
+    "daytime", "evening", "preferred", "residential", "legal"
+  ];
+
+  const VOCAB = (() => {
+    const v = new Set(CONCAT_MODIFIERS);
+    for (const def of Object.values(FIELD_DEFS)) {
+      for (const [kw] of def.keywords) {
+        for (const w of tokenize(kw)) if (w.length >= 3) v.add(w);
+      }
+    }
+    return v;
+  })();
+
+  const SEP = " "; // never equal to a keyword token
+
+  function splitConcat(tok) {
+    if (tok.length < 6 || VOCAB.has(tok)) return null;
+    for (let i = 3; i <= tok.length - 3; i++) {
+      const a = tok.slice(0, i), b = tok.slice(i);
+      if (VOCAB.has(a) && VOCAB.has(b)) return [a, b];
+    }
+    return null;
+  }
+
+  function expandTokens(toks) {
+    const out = [], extra = [];
+    for (const t of toks) {
+      const parts = splitConcat(t);
+      if (parts) { out.push(parts[0], parts[1]); extra.push(t); }
+      else out.push(t);
+    }
+    for (const e of extra) out.push(SEP, e);
+    return out;
   }
 
   // ---------------------------------------------------------------
@@ -234,9 +298,24 @@
       .trim();
   }
 
+  // Squashed form of a keyword: "card number" → "cardnumber", so a
+  // concatenated attribute like "creditcardnumber" still matches.
+  const SQUASH_CACHE = new Map();
+  function squash(kw) {
+    let s = SQUASH_CACHE.get(kw);
+    if (s === undefined) { s = kwTokens(kw).join(""); SQUASH_CACHE.set(kw, s); }
+    return s;
+  }
+
+  // Deliberately conservative: whole-token match, or substring of any token.
   function isBlockedDesc(desc) {
     const toks = tokenize(desc);
-    return BLOCKLIST.some(k => hasKeyword(toks, k));
+    return BLOCKLIST.some(k => {
+      if (hasKeyword(toks, k)) return true;
+      if (BLOCK_TOKEN_EXACT.has(k)) return false;
+      const s = squash(k);
+      return s.length >= 3 && toks.some(t => t.includes(s));
+    });
   }
 
   function isBlocked(desc, el) {
@@ -273,7 +352,7 @@
     const inputType = (opts.inputType || "").toLowerCase();
     if (!desc && !ac) return null;
 
-    const toks = tokenize(desc);
+    const toks = expandTokens(tokenize(desc));
     let best = null;
     for (const [type, def] of Object.entries(FIELD_DEFS)) {
       let score = 0;
@@ -506,7 +585,7 @@
   }
 
   function matchCustom(desc, profile) {
-    const toks = tokenize(desc);
+    const toks = expandTokens(tokenize(desc));
     for (const c of (profile && profile.custom) || []) {
       const kws = (c.keywords || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
       if (kws.some(k => hasKeyword(toks, k))) return c.value;
@@ -727,12 +806,7 @@
     const undo = document.createElement("button");
     undo.textContent = "Undo";
     undo.addEventListener("click", () => {
-      for (const s of result.snapshot) {
-        try {
-          if (s.select) setSelectValue(s.el, s.prev);
-          else setNativeValue(s.el, s.prev);
-        } catch { /* element gone */ }
-      }
+      undoFill(result);
       chip.remove();
     });
     chip.append(sep2, undo);
@@ -839,14 +913,35 @@
     } catch { return {}; }
   }
 
+  // All pin writes go through the background service worker, which serializes
+  // them. Every frame on a page fills independently, so read-modify-write here
+  // would lose whichever frame finished first.
   async function savePins(learned) {
     const key = siteKey();
     if (!key || !learned || !Object.keys(learned).length) return;
     try {
-      const { pins = {} } = await chrome.storage.local.get(["pins"]);
-      pins[key] = Object.assign({}, pins[key], learned);
-      await chrome.storage.local.set({ pins });
-    } catch { /* storage unavailable in this frame */ }
+      await chrome.runtime.sendMessage({ action: "pins", op: "merge", site: key, map: learned });
+    } catch { /* worker asleep or context invalidated */ }
+  }
+
+  async function unlearnPins(descriptors) {
+    const key = siteKey();
+    if (!key || !descriptors || !descriptors.length) return;
+    try {
+      await chrome.runtime.sendMessage({ action: "pins", op: "remove", site: key, descriptors });
+    } catch { /* worker asleep or context invalidated */ }
+  }
+
+  // Undo restores the previous values AND unlearns the pins that fill created,
+  // so an explicitly rejected mapping doesn't come back on the next fill.
+  function undoFill(result) {
+    for (const s of result.snapshot || []) {
+      try {
+        if (s.select) setSelectValue(s.el, s.prev);
+        else setNativeValue(s.el, s.prev);
+      } catch { /* element gone */ }
+    }
+    return unlearnPins(Object.keys(result.learned || {}));
   }
 
   // ---------------------------------------------------------------
@@ -937,8 +1032,8 @@
   // `module` is undefined in a content script, so this is inert in Chrome.
   if (typeof module !== "undefined" && module.exports) {
     module.exports = {
-      tokenize, hasKeyword, isBlockedDesc, classifyDesc, matchCustom,
-      decide, baseDomain, descriptor, fillPage
+      tokenize, hasKeyword, expandTokens, isBlockedDesc, classifyDesc, matchCustom,
+      decide, baseDomain, descriptor, fillPage, savePins, undoFill, loadPins
     };
   }
 })();

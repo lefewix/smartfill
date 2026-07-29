@@ -182,6 +182,52 @@ button.danger:hover {
 .pinhead { font-size: 10.5px; letter-spacing: .02em; color: var(--m7); }
 .pinhead b { color: var(--txt); font-family: var(--mono); font-weight: 600; }
 
+.chip .chip-label {
+  font: inherit;
+  color: inherit;
+  padding: 0 2px 0 0;
+  cursor: pointer;
+}
+.chip.on {
+  background: var(--ac);
+  border-color: var(--ac);
+  color: #fff;
+}
+.chip.on button { color: rgba(255, 255, 255, .75); }
+.chip.on button:hover { color: #fff; }
+
+.pindetail { display: flex; flex-direction: column; gap: 3px; }
+.pindetail:empty { display: none; }
+.pinrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 3px 4px 3px 7px;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--surface3);
+}
+.pinrow:hover { border-color: var(--hairh); }
+.pindesc {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  color: var(--m1);
+}
+.pintype { font-family: var(--mono); color: var(--ac-pale); }
+.pinrow button {
+  border: none;
+  background: transparent;
+  color: var(--m4);
+  padding: 0 4px;
+  font-size: 11px;
+  border-radius: 4px;
+}
+.pinrow button:hover { color: var(--txtstrong); }
+
 details { margin-top: 12px; }
 summary {
   cursor: pointer;
