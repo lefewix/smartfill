@@ -27,7 +27,7 @@ A browser extension for smart form prefill on event signup pages (Weeztix, Organ
 
 1. Open a signup form
 2. Click the SmartFill icon and press **Fill**, or press **Alt+Shift+F** (press **Preview** first to see what would be filled)
-3. Filled fields flash green — review everything, then submit the form yourself
+3. Filled fields flash violet — review everything, then submit the form yourself
 
 Existing values in a form are never overwritten, and SmartFill never submits a form on your behalf.
 
