@@ -162,7 +162,7 @@ chrome.commands.onCommand.addListener(async (command) => {
 
 async function showBadge(tabId, totals) {
   try {
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#433633" });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#a288a6" });
     await chrome.action.setBadgeText({ tabId, text: String(totals.filled) });
     await chrome.action.setTitle({
       tabId,
