@@ -1,4 +1,4 @@
-// Background service worker: keyboard shortcut + the single writer for pins.
+﻿// Background service worker: keyboard shortcut + the single writer for pins.
 
 // ---------------------------------------------------------------
 // Pins: { baseDomain: { descriptor: fieldType } }
@@ -25,7 +25,7 @@ function cleanSite(site) {
     && !unsafeKey(site) ? site : null;
 }
 
-// Keeps only descriptor → known-field-type entries of a sane size.
+// Keeps only descriptor â†’ known-field-type entries of a sane size.
 function cleanMap(map) {
   const out = Object.create(null);
   if (!map || typeof map !== "object") return out;
@@ -119,7 +119,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ---------------------------------------------------------------
-// Keyboard shortcut (Alt+Shift+F) → fill active tab with the active profile.
+// Keyboard shortcut (Alt+Shift+F) â†’ fill active tab with the active profile.
 // Signup forms often live inside iframes, so the message goes to every frame
 // (the content script is injected into all of them).
 // ---------------------------------------------------------------
@@ -162,11 +162,11 @@ chrome.commands.onCommand.addListener(async (command) => {
 
 async function showBadge(tabId, totals) {
   try {
-    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#8b5cf6" });
+    await chrome.action.setBadgeBackgroundColor({ tabId, color: "#433633" });
     await chrome.action.setBadgeText({ tabId, text: String(totals.filled) });
     await chrome.action.setTitle({
       tabId,
-      title: `SmartFill — filled ${totals.filled}, skipped ${totals.skipped}, blocked ${totals.blocked}`
+      title: `SmartFill â€” filled ${totals.filled}, skipped ${totals.skipped}, blocked ${totals.blocked}`
     });
     setTimeout(() => {
       chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});

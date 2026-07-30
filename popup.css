@@ -1,23 +1,23 @@
-/* SmartFill — FLX design base: dark violet, single accent, system fonts. */
+/* SmartFill — warm-paper family base: cream surfaces, walnut ink, almond tints. */
 :root {
-  --ac: #8b5cf6;
-  --ac2: #6366f1;
-  --ac-pale: color-mix(in srgb, var(--ac) 45%, white);
-  --ac-soft: color-mix(in srgb, var(--ac) 72%, white);
-  --bg: #101014;
-  --surface: #17161c;
-  --surface3: #17171c;
-  --inp: #0c0c10;
-  --txt: #ecebf0;
-  --txtstrong: #ffffff;
-  --m1: #9b93b3;
-  --m4: #8a879d;
-  --m7: #838096;
-  --b1: #24232c;
-  --hair: rgba(255, 255, 255, .08);
-  --hairh: rgba(255, 255, 255, .14);
-  --err: #ff8b8b;
-  --warn: #e8b160;
+  --ac: #433633;
+  --ac2: #5c5552;
+  --ac-pale: #6b5744;
+  --ac-soft: #decbb7;
+  --bg: #f7f0f5;
+  --surface: #fffdfb;
+  --surface3: #fbf6f2;
+  --inp: #fffdfb;
+  --txt: #433633;
+  --txtstrong: #2a211e;
+  --m1: #5c5552;
+  --m4: #6e6560;
+  --m7: #8f857d;
+  --b1: #e0d5cb;
+  --hair: rgba(67, 54, 51, .12);
+  --hairh: rgba(67, 54, 51, .24);
+  --err: #a94438;
+  --warn: #946300;
 
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
@@ -92,13 +92,13 @@ button:active { transform: translateY(1px); }
 button.primary {
   background: var(--ac);
   border-color: var(--ac);
-  color: #fff;
+  color: #f7f0f5;
   font-weight: 600;
 }
 button.primary:hover {
-  background: color-mix(in srgb, var(--ac) 85%, white);
-  border-color: color-mix(in srgb, var(--ac) 85%, white);
-  color: #fff;
+  background: var(--ac2);
+  border-color: var(--ac2);
+  color: #f7f0f5;
 }
 
 /* Secondary buttons already use the base style; .ghost is an explicit alias. */
@@ -123,8 +123,8 @@ button.danger:hover {
 }
 .status.ok {
   color: var(--ac-pale);
-  background: color-mix(in srgb, var(--ac) 16%, transparent);
-  border-color: color-mix(in srgb, var(--ac-soft) 32%, transparent);
+  background: color-mix(in srgb, var(--ac-soft) 40%, transparent);
+  border-color: color-mix(in srgb, var(--ac-soft) 90%, transparent);
 }
 .status.err {
   color: var(--err);
@@ -139,7 +139,7 @@ button.danger:hover {
   border: 1px solid var(--hair);
   border-radius: 12px;
   background: var(--surface);
-  box-shadow: 0 4px 16px rgba(8, 5, 20, .45);
+  box-shadow: 0 4px 16px rgba(67, 54, 51, .12);
   display: flex;
   flex-direction: column;
   gap: 9px;
@@ -154,8 +154,8 @@ button.danger:hover {
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  background: color-mix(in srgb, var(--ac) 16%, transparent);
-  border: 1px solid color-mix(in srgb, var(--ac-soft) 32%, transparent);
+  background: color-mix(in srgb, var(--ac-soft) 40%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ac-soft) 90%, transparent);
   border-radius: 6px;
   padding: 2px 3px 2px 8px;
   font-size: 11px;
@@ -192,10 +192,10 @@ button.danger:hover {
 .chip.on {
   background: var(--ac);
   border-color: var(--ac);
-  color: #fff;
+  color: #f7f0f5;
 }
-.chip.on button { color: rgba(255, 255, 255, .75); }
-.chip.on button:hover { color: #fff; }
+.chip.on button { color: rgba(247, 240, 245, .75); }
+.chip.on button:hover { color: #f7f0f5; }
 
 .pindetail { display: flex; flex-direction: column; gap: 3px; }
 .pindetail:empty { display: none; }
