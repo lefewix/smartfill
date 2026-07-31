@@ -62,6 +62,15 @@ Pin storage is written only by the background service worker, which applies ever
 
 Visibility is checked before anything else: disabled, read-only, zero-sized, `display: none`, `visibility: hidden`, `opacity: 0` (including a transparent ancestor) and far-off-screen fields are never candidates. That last pair is what keeps SmartFill out of signup honeypots.
 
+### Permissions
+
+- `storage` — profiles, allowlist, and pins live in `chrome.storage.local`
+- `webNavigation` — enumerates a tab's frames so fill requests reach forms inside iframes
+- `alarms` — clears the keyboard-shortcut badge after a few seconds (an MV3 service worker's `setTimeout` dies with the worker)
+- `<all_urls>` host access with a statically declared content script — this is deliberately broad and is what makes both auto-fill-on-load and the manual popup/shortcut fill work on any site without a per-site prompt. `activeTab` was removed because it was entirely redundant next to it (everything it would grant is already granted), and narrowing `<all_urls>` to a site list would break the core manual-fill flow on arbitrary signup sites
+
+Exports include the domains of sites you've filled on (pins) and your auto-fill allowlist, alongside profile data.
+
 ## Limitations
 
 - Custom widget dropdowns (div-based comboboxes, react-select) are not real `<select>` elements and are not filled

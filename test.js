@@ -89,6 +89,9 @@ globalThis.MutationObserver = class { observe() {} disconnect() {} };
 // The extension arms real timers (flash highlight, chip dismissal, preview
 // teardown). None of them matter here and they would keep node alive, so the
 // harness runs with timers stubbed out.
+// A few tests (flash restore) need a real timer; keep a handle before stubbing.
+const REAL_SETTIMEOUT = globalThis.setTimeout;
+const sleep = (ms) => new Promise(r => REAL_SETTIMEOUT(r, ms));
 globalThis.setTimeout = () => 0;
 globalThis.clearTimeout = () => {};
 globalThis.alert = () => {};
@@ -97,11 +100,24 @@ let CONFIRM_ANSWER = true;
 
 const storage = { data: {} };
 const sentMessages = [];
+// Listeners are recorded so tests can drive the real message handlers
+// (content.js registers first, background.js later).
+const messageListeners = [];
+const alarmListeners = [];
+const alarmsCreated = [];
+const badge = { text: null, color: null, title: null };
+// Swappable so a test can make the pin round-trip observably async.
+let sendMessageImpl = async (m) => { sentMessages.push(m); return { ok: true }; };
 globalThis.chrome = {
   runtime: {
-    onMessage: { addListener() {} },
-    sendMessage: async (m) => { sentMessages.push(m); return { ok: true }; },
+    onMessage: { addListener(fn) { messageListeners.push(fn); } },
+    sendMessage: (m) => sendMessageImpl(m),
     lastError: null
+  },
+  alarms: {
+    create(name, info) { alarmsCreated.push({ name, info }); },
+    clear: async () => true,
+    onAlarm: { addListener(fn) { alarmListeners.push(fn); } }
   },
   storage: {
     local: {
@@ -116,7 +132,11 @@ globalThis.chrome = {
   commands: { onCommand: { addListener() {} } },
   tabs: { query: async () => [], sendMessage() {} },
   webNavigation: { getAllFrames: async () => [{ frameId: 0 }] },
-  action: { setBadgeText() {}, setBadgeBackgroundColor() {} }
+  action: {
+    setBadgeText: async ({ text }) => { badge.text = text; },
+    setBadgeBackgroundColor: async ({ color }) => { badge.color = color; },
+    setTitle: async ({ title }) => { badge.title = title; }
+  }
 };
 
 // ---------------------------------------------------------------
@@ -484,6 +504,181 @@ function runPopupTests() {
   eq(res.sites, ["evil.example", "eventbrite.com"], "import returns the sites for confirmation");
 }
 
+// ---------------------------------------------------------------
+// 11. H1 — the fill response must land AFTER the pin write round-trip,
+//     or the popup's refreshPins() reads stale pins.
+// ---------------------------------------------------------------
+async function runPinOrderingTests() {
+  group("fill response waits for the pin write (H1)");
+  const listener = messageListeners[0];
+  ok(typeof listener === "function", "content.js registered a message listener");
+  if (typeof listener !== "function") return;
+
+  const order = [];
+  let release = null;
+  sendMessageImpl = (m) => new Promise(resolve => {
+    order.push("pin-write-sent");
+    sentMessages.push(m);
+    release = () => { order.push("pin-write-done"); resolve({ ok: true }); };
+  });
+
+  PAGE_FIELDS = [field({ label: "First name", name: "fname" })];
+  const responded = new Promise(resolve => {
+    listener({ action: "smartfill", profile: PROFILE }, {}, (resp) => {
+      order.push("responded");
+      resolve(resp);
+    });
+  });
+  await sleep(5);
+  ok(order.includes("pin-write-sent"), "a pin write was issued");
+  ok(!order.includes("responded"), "response is withheld while the pin write is in flight");
+  if (release) release();
+  const resp = await responded;
+  eq(order.filter(o => o !== "pin-write-sent"), ["pin-write-done", "responded"],
+    "response lands only after the pin write resolves");
+  ok(resp && resp.ok, "response still reports success");
+
+  // A rejected write must not swallow the response (popup would hang).
+  sendMessageImpl = async () => { throw new Error("worker asleep"); };
+  PAGE_FIELDS = [field({ label: "Last name", name: "lname" })];
+  const resp2 = await new Promise(resolve => {
+    listener({ action: "smartfill", profile: PROFILE }, {}, resolve);
+  });
+  ok(resp2 && resp2.ok, "a failed pin write still answers the popup");
+
+  sendMessageImpl = async (m) => { sentMessages.push(m); return { ok: true }; };
+}
+
+// ---------------------------------------------------------------
+// 12. M4 — flash() restore race
+// ---------------------------------------------------------------
+async function runFlashTests() {
+  group("flash(): mauve ring, no permanent stick on double-fill (M4)");
+  const realSet = REAL_SETTIMEOUT;
+  const timers = [];
+  globalThis.setTimeout = (fn, ms) => { const id = timers.length; timers.push({ fn, ms, live: true }); return id; };
+  globalThis.clearTimeout = (id) => { if (timers[id]) timers[id].live = false; };
+  const drain = () => {
+    for (let i = 0; i < timers.length; i++) {
+      const t = timers[i];
+      if (t && t.live) { t.live = false; t.fn(); }
+    }
+  };
+
+  const el = new HTMLInputElement();
+  el.style = { boxShadow: "inset 0 0 0 1px #ccc", transition: "" };
+  const original = el.style.boxShadow;
+
+  C.flash(el);
+  ok(/a288a6/i.test(el.style.boxShadow), "ring uses the mauve accent, not #8b5cf6");
+  ok(!/8b5cf6/i.test(el.style.boxShadow), "no vivid purple anywhere in the ring");
+  ok(/box-shadow/.test(el.style.transition), "box-shadow is transitioned, not snapped");
+
+  C.flash(el); // rapid second fill before the first restore ran
+  drain();
+  eq(el.style.boxShadow, original, "double-fill restores the ORIGINAL shadow, not the ring");
+  drain();
+  eq(el.style.transition, "", "inline transition is cleaned up afterwards");
+
+  globalThis.setTimeout = () => 0;
+  globalThis.clearTimeout = () => {};
+  void realSet;
+}
+
+// ---------------------------------------------------------------
+// 13. Lows — list sync, preview count, select matcher, pin budget
+// ---------------------------------------------------------------
+function runSyncTests() {
+  const P = require("./popup.js");
+
+  group("popup and content keep their duplicated lists in sync");
+  ok(Array.isArray(C.BLOCKLIST) && C.BLOCKLIST.length > 0, "content.js exports BLOCKLIST");
+  eq([...(P.BLOCKLIST || [])].sort(), [...(C.BLOCKLIST || [])].sort(),
+    "popup keyword-warning blocklist === content fill blocklist");
+  eq([...(P.BLOCK_TOKEN_EXACT || [])].sort(), [...(C.BLOCK_TOKEN_EXACT || [])].sort(),
+    "short exact-only block tokens match");
+  eq([...(P.TWO_PART_TLDS || [])].sort(), [...(C.TWO_PART_TLDS || [])].sort(),
+    "TWO_PART_TLDS match between popup and content");
+
+  group("keyword warning mirrors the real blocklist");
+  ok(/blocked/i.test(P.keywordWarning("card number") || ""), "'card number' warned as blocked");
+  ok(P.keywordIsBlocked("expMonth"), "'expMonth' caught (exp* hole closed on the warning side too)");
+  ok(P.keywordIsBlocked("social insurance number"), "multi-word blocklist entry caught");
+  ok(!P.keywordIsBlocked("postal code"), "'postal code' is NOT blocked (negative case)");
+  ok(!P.keywordIsBlocked("expo pass"), "'expo pass' is NOT blocked by the exp exact-token rule");
+  ok(!P.keywordIsBlocked("shipping address"), "ordinary keyword not blocked");
+
+  group("preview count reflects what was annotated");
+  PAGE_FIELDS = [
+    field({ label: "First name", name: "fname" }),
+    field({ label: "Email", name: "email", value: "already@there.com" }), // not annotated
+    field({ label: "Card number", name: "cardNumber" }),
+    field({ label: "Hotel name", name: "hotel" })
+  ];
+  const pv = C.previewPage(PROFILE, {});
+  eq(pv.total, pv.preview + pv.skipped + pv.blocked, "total === what was actually annotated");
+  ok(pv.total <= PAGE_FIELDS.length, "total never exceeds the fields on the page");
+  ok(pv.blocked >= 1, "the payment field is counted as blocked");
+
+  group("select matching still handles short codes after the dead matcher went");
+  const prov = field({ tag: "select", label: "Province", name: "province", options: ["", "ON", "QC", "BC"] });
+  C.fillSelect(prov, "ON");
+  eq(prov.value, "ON", "two-letter province code matched by exact value");
+  const country = field({
+    tag: "select", label: "Country", name: "country",
+    options: [{ value: "CA", text: "Canada" }, { value: "US", text: "United States" }]
+  });
+  C.fillSelect(country, "Canada");
+  eq(country.value, "CA", "full name matched by option text");
+  const nope = field({ tag: "select", label: "Country", name: "country", options: ["Canada", "Mexico"] });
+  C.fillSelect(nope, "Atlantis");
+  eq(nope.value, "", "no fuzzy match -> select left alone (negative case)");
+
+  group("cleanPins: only contributing sites spend the site budget");
+  const raw = {};
+  for (let i = 0; i < LIMIT_PROBE(P) + 5; i++) raw["empty" + i + ".com"] = {}; // contribute nothing
+  raw["real.com"] = { "first name": "firstName" };
+  const cleaned = P.cleanPins(raw);
+  eq(Object.keys(cleaned), ["real.com"], "empty sites don't consume the budget or appear");
+  const dupes = P.cleanPins({
+    "https://www.shop.example.com/x": { "first name": "firstName" },
+    "shop.example.com": { "last name": "lastName" }
+  });
+  eq(Object.keys(dupes).length, 1, "two raw keys normalizing alike collapse to one site");
+  ok(Object.keys(dupes[Object.keys(dupes)[0]]).length === 2, "and their pins merge");
+}
+function LIMIT_PROBE(P) { return (P.LIMITS && P.LIMITS.sites) || 200; }
+
+// ---------------------------------------------------------------
+// 14. H2/M2 — badge cleanup via alarms; shortcut failures are visible
+// ---------------------------------------------------------------
+async function runBadgeTests() {
+  group("badge: alarms clear it, failures are not silent (H2/M2)");
+  const B = require("./background.js");
+  ok(typeof B.showBadge === "function", "background exports showBadge");
+  if (typeof B.showBadge !== "function") return;
+
+  alarmsCreated.length = 0;
+  await B.showBadge(7, { filled: 2, skipped: 1, blocked: 1 });
+  eq(badge.text, "2", "success badge shows the filled count");
+  eq(alarmsCreated.length, 1, "cleanup is scheduled through chrome.alarms, not setTimeout");
+  ok(alarmsCreated[0].name.startsWith(B.BADGE_ALARM_PREFIX), "alarm name is namespaced per tab");
+  ok(alarmsCreated[0].name.endsWith("7"), "alarm carries the tab id");
+
+  await B.showBadge(7, null, { error: "no profile yet" });
+  eq(badge.text, "!", "an error shows '!' rather than a '0' that reads as success");
+  ok(/no profile yet/.test(badge.title || ""), "the title says what went wrong");
+
+  ok(alarmListeners.length > 0, "background registered an onAlarm listener");
+  await alarmListeners[0]({ name: B.BADGE_ALARM_PREFIX + "7" });
+  eq(badge.text, "", "the alarm clears the badge");
+  eq(badge.title, "SmartFill", "and resets the title");
+
+  badge.text = "keep";
+  await alarmListeners[0]({ name: "some-other-extension-alarm" });
+  eq(badge.text, "keep", "unrelated alarms are ignored (negative case)");
+}
+
 function report() {
   console.log("\n" + "-".repeat(56));
   for (const f of failures) console.log("  FAIL  " + f);
@@ -493,8 +688,12 @@ function report() {
 
 (async () => {
   try {
+    await runPinOrderingTests();
+    await runFlashTests();
     await runBackgroundTests();
+    await runBadgeTests();
     runPopupTests();
+    runSyncTests();
   } catch (e) {
     fail++; failures.push("harness crashed: " + (e && e.stack || e));
   }

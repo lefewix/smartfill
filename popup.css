@@ -12,7 +12,7 @@
   --txtstrong: #ffffff;
   --m1: #ccbcbc;
   --m4: #b1a4a7;
-  --m7: #948a8e;
+  --m7: #a39a9e; /* brightened: this ink carries 11px labels/footers */
   --b1: #35363c;
   --hair: rgba(241, 227, 228, .09);
   --hairh: rgba(241, 227, 228, .16);
@@ -21,6 +21,12 @@
 
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --ease: cubic-bezier(0.23, 1, 0.32, 1); /* explicit ease-out everywhere */
+}
+
+@keyframes rise-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: none; }
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -54,7 +60,7 @@ header {
   letter-spacing: -.02em;
   color: var(--txtstrong);
 }
-.hint { color: var(--m7); font-size: 10.5px; font-family: var(--mono); }
+.hint { color: var(--m7); font-size: 11px; font-family: var(--mono); }
 
 .row { display: flex; gap: 8px; }
 .row.actions { margin-top: 12px; }
@@ -67,7 +73,7 @@ select, input {
   color: var(--txt);
   padding: 7px 9px;
   font: inherit;
-  transition: border-color .15s, background .15s, color .15s;
+  transition: border-color .15s var(--ease), background .15s var(--ease), color .15s var(--ease);
 }
 select:hover, input:hover { border-color: var(--hairh); }
 select:focus, input:focus { outline: none; border-color: var(--ac); }
@@ -84,10 +90,10 @@ button {
   background: var(--surface3);
   color: var(--m1);
   white-space: nowrap;
-  transition: background .15s, border-color .15s, color .15s;
+  transition: background .15s var(--ease), border-color .15s var(--ease), color .15s var(--ease), transform .15s var(--ease);
 }
 button:hover { border-color: var(--hairh); color: var(--txt); }
-button:active { transform: translateY(1px); }
+button:active { transform: scale(0.97); }
 
 button.primary {
   background: var(--ac);
@@ -131,6 +137,18 @@ button.danger:hover {
   background: color-mix(in srgb, var(--err) 12%, transparent);
   border-color: color-mix(in srgb, var(--err) 32%, transparent);
 }
+.status.warn {
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  border-color: color-mix(in srgb, var(--warn) 30%, transparent);
+}
+.status:not([hidden]) { animation: rise-in .14s var(--ease); }
+.status button.undo {
+  margin-left: 4px;
+  padding: 2px 9px;
+  font-size: 11px;
+  vertical-align: baseline;
+}
 
 /* Auto-fill site section */
 .auto {
@@ -161,13 +179,15 @@ button.danger:hover {
   font-size: 11px;
   font-family: var(--mono);
   color: var(--ac-pale);
+  animation: rise-in .14s var(--ease);
 }
 .chip button {
   border: none;
   background: transparent;
   color: var(--m4);
-  padding: 0 5px;
-  font-size: 11px;
+  padding: 4px 7px; /* comfortable ✕ hit target */
+  font-size: 12px;
+  line-height: 1;
   border-radius: 4px;
 }
 .chip button:hover { color: var(--txtstrong); background: transparent; }
@@ -180,7 +200,7 @@ button.danger:hover {
   padding-top: 9px;
   border-top: 1px solid var(--hair);
 }
-.pinhead { font-size: 10.5px; letter-spacing: .02em; color: var(--m7); }
+.pinhead { font-size: 11px; letter-spacing: .02em; color: var(--m7); }
 .pinhead b { color: var(--txt); font-family: var(--mono); font-weight: 600; }
 
 .chip .chip-label {
@@ -219,12 +239,16 @@ button.danger:hover {
   color: var(--m1);
 }
 .pintype { font-family: var(--mono); color: var(--ac-pale); }
+.pinrow {
+  animation: rise-in .14s var(--ease);
+}
 .pinrow button {
   border: none;
   background: transparent;
   color: var(--m4);
-  padding: 0 4px;
-  font-size: 11px;
+  padding: 4px 7px; /* comfortable ✕ hit target */
+  font-size: 12px;
+  line-height: 1;
   border-radius: 4px;
 }
 .pinrow button:hover { color: var(--txtstrong); }
@@ -237,7 +261,7 @@ summary {
   margin-bottom: 10px;
   font-size: 12px;
   border-radius: 6px;
-  transition: color .15s;
+  transition: color .15s var(--ease);
 }
 summary:hover { color: var(--txt); }
 
@@ -246,7 +270,7 @@ summary:hover { color: var(--txt); }
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 10.5px;
+  font-size: 11px;
   font-weight: 500;
   letter-spacing: .02em;
   color: var(--m7);
@@ -263,7 +287,7 @@ h3 {
   font-weight: 700;
   letter-spacing: -.02em;
 }
-.note { color: var(--m7); font-size: 10.5px; margin-bottom: 8px; }
+.note { color: var(--m7); font-size: 11px; margin-bottom: 8px; }
 
 .custom-row { display: flex; gap: 6px; margin-bottom: 6px; }
 .custom-row input:first-child { flex: 1.2; }
@@ -271,19 +295,25 @@ h3 {
 .custom-row button { padding: 5px 9px; }
 .kw-warn {
   margin: -3px 0 7px;
-  font-size: 10.5px;
+  font-size: 11px;
   line-height: 1.4;
   color: var(--warn);
+  animation: rise-in .14s var(--ease);
 }
 .kw-warn[hidden] { display: none; }
 
 footer {
   margin-top: 14px;
   color: var(--m7);
-  font-size: 10px;
+  font-size: 11px;
   letter-spacing: .01em;
   border-top: 1px solid var(--hair);
   padding-top: 10px;
 }
 .footactions { margin-bottom: 8px; }
 .footactions button { flex: 1; font-size: 12px; }
+footer p + p.disclose { margin-top: 4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}

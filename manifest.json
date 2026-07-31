@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "description": "Smart form prefill for event signups. Local profiles, explicit trigger, no auto-submit.",
   "author": "Felix Wang",
-  "permissions": ["storage", "activeTab", "webNavigation"],
+  "permissions": ["storage", "webNavigation", "alarms"],
   "host_permissions": ["<all_urls>"],
   "icons": {
     "16": "icons/icon16.png",

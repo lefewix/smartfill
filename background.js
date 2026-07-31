@@ -1,4 +1,4 @@
-﻿// Background service worker: keyboard shortcut + the single writer for pins.
+// Background service worker: keyboard shortcut + the single writer for pins.
 
 // ---------------------------------------------------------------
 // Pins: { baseDomain: { descriptor: fieldType } }
@@ -25,7 +25,7 @@ function cleanSite(site) {
     && !unsafeKey(site) ? site : null;
 }
 
-// Keeps only descriptor â†’ known-field-type entries of a sane size.
+// Keeps only descriptor → known-field-type entries of a sane size.
 function cleanMap(map) {
   const out = Object.create(null);
   if (!map || typeof map !== "object") return out;
@@ -119,7 +119,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
 });
 
 // ---------------------------------------------------------------
-// Keyboard shortcut (Alt+Shift+F) â†’ fill active tab with the active profile.
+// Keyboard shortcut (Alt+Shift+F) → fill active tab with the active profile.
 // Signup forms often live inside iframes, so the message goes to every frame
 // (the content script is injected into all of them).
 // ---------------------------------------------------------------
@@ -135,21 +135,28 @@ async function frameIds(tabId) {
 
 chrome.commands.onCommand.addListener(async (command) => {
   if (command !== "fill-form") return;
-  const { profiles = [], activeProfileId } = await chrome.storage.local.get(["profiles", "activeProfileId"]);
-  const profile = profiles.find(p => p.id === activeProfileId) || profiles[0];
-  if (!profile) return;
-
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) return;
+
+  const { profiles = [], activeProfileId } = await chrome.storage.local.get(["profiles", "activeProfileId"]);
+  const profile = profiles.find(p => p.id === activeProfileId) || profiles[0];
+  if (!profile) {
+    // The shortcut must not fail silently: no profile -> "!" badge + a title
+    // that says what to do about it.
+    await showBadge(tab.id, null, { error: "no profile yet - click the toolbar icon to create one" });
+    return;
+  }
 
   // The shortcut has no popup to report into, so the per-frame responses are
   // totalled onto the toolbar badge. Each frame still shows its own chip, and
   // that chip's Undo covers that frame's fill.
   const totals = { filled: 0, skipped: 0, blocked: 0 };
+  let responded = false;
   await Promise.all((await frameIds(tab.id)).map(frameId => new Promise(resolve => {
     chrome.tabs.sendMessage(tab.id, { action: "smartfill", profile }, { frameId }, (resp) => {
       void chrome.runtime.lastError; // frames without a content script never answer
       if (resp && resp.ok && resp.result) {
+        responded = true;
         totals.filled += resp.result.filled || 0;
         totals.skipped += resp.result.skipped || 0;
         totals.blocked += resp.result.blocked || 0;
@@ -157,25 +164,54 @@ chrome.commands.onCommand.addListener(async (command) => {
       resolve();
     });
   })));
-  await showBadge(tab.id, totals);
+  if (!responded) {
+    // Distinguish "no content script answered" from "matched 0 fields": a
+    // badge of "0" for both would hide the actionable failure.
+    await showBadge(tab.id, null, { error: "couldn't reach this page - reload the tab and try again" });
+  } else {
+    await showBadge(tab.id, totals);
+  }
 });
 
-async function showBadge(tabId, totals) {
+// Badge cleanup goes through chrome.alarms, not setTimeout: an MV3 service
+// worker can be suspended within seconds of going idle and its timers die
+// with it, leaving the badge stuck. An alarm survives suspension (Chrome may
+// clamp sub-30s alarms in packed builds; a late clear beats a stuck badge).
+const BADGE_ALARM_PREFIX = "smartfill-badge:";
+const BADGE_CLEAR_MS = 5000;
+
+async function showBadge(tabId, totals, opts = {}) {
   try {
+    if (opts.error) {
+      await chrome.action.setBadgeBackgroundColor({ tabId, color: "#d9aa5e" });
+      await chrome.action.setBadgeText({ tabId, text: "!" });
+      await chrome.action.setTitle({ tabId, title: "SmartFill - " + opts.error });
+      chrome.alarms.create(BADGE_ALARM_PREFIX + tabId, { when: Date.now() + BADGE_CLEAR_MS });
+      return;
+    }
     await chrome.action.setBadgeBackgroundColor({ tabId, color: "#a288a6" });
     await chrome.action.setBadgeText({ tabId, text: String(totals.filled) });
     await chrome.action.setTitle({
       tabId,
-      title: `SmartFill â€” filled ${totals.filled}, skipped ${totals.skipped}, blocked ${totals.blocked}`
+      title: `SmartFill — filled ${totals.filled}, skipped ${totals.skipped}, blocked ${totals.blocked}`
     });
-    setTimeout(() => {
-      chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {});
-      chrome.action.setTitle({ tabId, title: "SmartFill" }).catch(() => {});
-    }, 5000);
+    chrome.alarms.create(BADGE_ALARM_PREFIX + tabId, { when: Date.now() + BADGE_CLEAR_MS });
   } catch { /* tab closed */ }
 }
 
+chrome.alarms.onAlarm.addListener(async (alarm) => {
+  if (!alarm || typeof alarm.name !== "string" || !alarm.name.startsWith(BADGE_ALARM_PREFIX)) return;
+  const tabId = Number(alarm.name.slice(BADGE_ALARM_PREFIX.length));
+  try {
+    await chrome.action.setBadgeText({ tabId, text: "" });
+    await chrome.action.setTitle({ tabId, title: "SmartFill" });
+  } catch { /* tab closed */ }
+});
+
 // Test hook: `module` is undefined in a service worker, so this is inert.
 if (typeof module !== "undefined" && module.exports) {
-  module.exports = { applyPinOp, cleanMap, capMap, cleanSite, MAX_PINS_PER_SITE, MAX_SITES };
+  module.exports = {
+    applyPinOp, cleanMap, capMap, cleanSite, showBadge,
+    BADGE_ALARM_PREFIX, MAX_PINS_PER_SITE, MAX_SITES
+  };
 }

@@ -14,6 +14,8 @@ let currentBase = null; // base domain of the active tab
 const $ = (id) => document.getElementById(id);
 
 // ---- domain normalization ----
+// KEEP IN SYNC with TWO_PART_TLDS in content.js — the popup and a content
+// script can't share a module without a build step; test.js asserts equality.
 const TWO_PART_TLDS = new Set([
   "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au",
   "co.jp", "ne.jp", "or.jp", "co.nz", "com.br", "com.mx", "co.in", "co.kr"
@@ -215,18 +217,52 @@ function render() {
 // ("Postal code", "Discount code"). Content script and popup must agree on
 // what counts as specific enough — keep in sync with customKeywordOk there.
 const CUSTOM_KW_MIN_CHARS = 5;
-const BLOCKLIST_WORDS = [
-  "card", "cardnumber", "cvv", "cvc", "exp", "expiry", "expiration", "password",
-  "pin", "iban", "routing", "sin", "ssn", "security code"
+
+// KEEP IN SYNC with BLOCKLIST / BLOCK_TOKEN_EXACT in content.js — this is the
+// warning-side copy of the fill-side blocklist; test.js asserts they match.
+const BLOCKLIST = [
+  "card number", "cardnumber", "card-number", "cc-number", "ccnumber",
+  "cardnum", "name on card", "cardholder", "card holder",
+  "cvv", "cvc", "cvv2", "security code", "sec code", "expiry", "expiration",
+  "exp", "expdate", "expmonth", "expyear",
+  "password", "passwd", "pin", "pincode", "iban", "routing", "account number", "sin",
+  "social insurance", "social security", "ssn"
 ];
+const BLOCK_TOKEN_EXACT = new Set(["sin", "ssn", "pin", "exp"]);
+
+function kwTokenize(s) {
+  return String(s || "")
+    .toLowerCase()
+    .replace(/([a-z])([0-9])/g, "$1 $2")
+    .replace(/([0-9])([a-z])/g, "$1 $2")
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+}
+
+// Mirrors content.js isBlockedDesc: whole-token run, or substring of a token
+// (except the short exact-only terms).
+function keywordIsBlocked(kw) {
+  const toks = kwTokenize(kw);
+  return BLOCKLIST.some(entry => {
+    const parts = kwTokenize(entry);
+    outer:
+    for (let i = 0; i + parts.length <= toks.length; i++) {
+      for (let j = 0; j < parts.length; j++) if (toks[i + j] !== parts[j]) continue outer;
+      return true;
+    }
+    if (BLOCK_TOKEN_EXACT.has(entry)) return false;
+    const squashed = parts.join("");
+    return squashed.length >= 3 && toks.some(t => t.includes(squashed));
+  });
+}
 
 function keywordWarning(raw) {
   const kws = (raw || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
   const weak = [], blocked = [];
   for (const k of kws) {
-    const toks = k.split(/[^a-z0-9]+/).filter(Boolean);
+    const toks = kwTokenize(k);
     if (toks.length < 2 && (toks[0] || "").length < CUSTOM_KW_MIN_CHARS) weak.push(k);
-    if (toks.some(t => BLOCKLIST_WORDS.includes(t))) blocked.push(k);
+    if (keywordIsBlocked(k)) blocked.push(k);
   }
   if (blocked.length) {
     return `“${blocked[0]}” overlaps a blocked payment/credential term — that field is never filled.`;
@@ -292,12 +328,41 @@ function status(msg, cls) {
   s.className = "status" + (cls ? " " + cls : "");
 }
 
+// Status line with a one-shot Undo button (used for profile deletion).
+function statusUndo(msg, cls, onUndo) {
+  const s = $("status");
+  s.hidden = false;
+  s.textContent = "";
+  s.className = "status" + (cls ? " " + cls : "");
+  s.append(msg + " ");
+  const b = document.createElement("button");
+  b.textContent = "Undo";
+  b.className = "ghost undo";
+  b.addEventListener("click", () => { b.disabled = true; onUndo(); }, { once: true });
+  s.appendChild(b);
+}
+
+// ---- unsaved-edit tracking (Save is what commits; make that visible) ----
+let editorDirty = false;
+function markDirty() {
+  if (editorDirty) return;
+  editorDirty = true;
+  $("saveBtn").textContent = "Save •";
+  $("saveBtn").title = "You have unsaved edits — Save keeps them";
+}
+function clearDirty() {
+  editorDirty = false;
+  $("saveBtn").textContent = "Save";
+  $("saveBtn").title = "";
+}
+
 // --- events ---
 
 $("profileSelect").addEventListener("change", async (e) => {
   activeProfileId = e.target.value;
   await persist();
   render();
+  clearDirty();
 });
 
 $("saveBtn").addEventListener("click", async () => {
@@ -306,8 +371,13 @@ $("saveBtn").addEventListener("click", async () => {
   readEditor(p);
   await persist();
   render();
+  clearDirty();
   status("Saved.", "ok");
 });
+
+// Any edit inside the editor (profile fields or custom rows) marks unsaved
+// state so edits aren't silently lost when the popup closes.
+$("editor").addEventListener("input", markDirty);
 
 $("newBtn").addEventListener("click", async () => {
   newProfile();
@@ -319,11 +389,23 @@ $("newBtn").addEventListener("click", async () => {
 
 $("deleteBtn").addEventListener("click", async () => {
   if (!confirm("Delete this profile?")) return;
+  const idx = profiles.findIndex(p => p.id === activeProfileId);
+  const removed = idx >= 0 ? profiles[idx] : null;
   profiles = profiles.filter(p => p.id !== activeProfileId);
   activeProfileId = profiles[0] ? profiles[0].id : null;
   if (!profiles.length) newProfile();
   await persist();
   render();
+  clearDirty();
+  if (removed) {
+    statusUndo(`Deleted “${removed.label || "(unnamed)"}”.`, null, async () => {
+      profiles.splice(Math.min(Math.max(idx, 0), profiles.length), 0, removed);
+      activeProfileId = removed.id;
+      await persist();
+      render();
+      status("Profile restored.", "ok");
+    });
+  }
 });
 
 $("addCustom").addEventListener("click", () => {
@@ -372,10 +454,16 @@ async function frameIds(tabId) {
 }
 
 async function runOnPage(action) {
-  const p = activeProfile();
-  if (!p) { status("No profile.", "err"); return null; }
-  readEditor(p); // act on whatever is on screen, saved or not
-  await persist();
+  const saved = activeProfile();
+  if (!saved) { status("No profile.", "err"); return null; }
+  // Act on whatever is on screen — but on an in-memory copy. Fill/Preview must
+  // not silently commit unsaved editor edits; only Save persists.
+  const p = {
+    ...saved,
+    fields: { ...(saved.fields || {}) },
+    custom: (saved.custom || []).map(c => ({ ...c }))
+  };
+  readEditor(p);
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) { status("No active tab.", "err"); return null; }
@@ -412,7 +500,15 @@ $("fillBtn").addEventListener("click", async () => {
   // field would pick up.
   if (t.skipped) msg += ` ${t.skipped} unmatched — add a custom field for them.`;
   if (t.blocked) msg += ` ${t.blocked} payment/password field${t.blocked === 1 ? "" : "s"} blocked.`;
-  status(msg, "ok");
+  if (editorDirty) msg += " (Used unsaved edits — Save to keep them.)";
+  // "Filled 0" is not a success: style it as a warning with the nudge front
+  // and center rather than a green pat on the back.
+  if (t.filled === 0) {
+    if (!t.skipped) msg += " No fillable fields matched — try Preview, or add a custom field.";
+    status(msg, "warn");
+  } else {
+    status(msg, "ok");
+  }
   await refreshPins();
 });
 
@@ -428,8 +524,8 @@ $("previewBtn").addEventListener("click", async () => {
 // --- export / import ---
 
 $("exportBtn").addEventListener("click", async () => {
-  const p = activeProfile();
-  if (p) { readEditor(p); await persist(); }
+  // Exports the SAVED state only — exporting must not silently commit
+  // unsaved editor edits (Save is the single commit point).
   const payload = {
     smartfill: 1,
     exportedAt: new Date().toISOString(),
@@ -441,7 +537,9 @@ $("exportBtn").addEventListener("click", async () => {
   a.download = `smartfill-${new Date().toISOString().slice(0, 10)}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(url), 5000);
-  status(`Exported ${profiles.length} profile${profiles.length === 1 ? "" : "s"}.`, "ok");
+  let msg = `Exported ${profiles.length} profile${profiles.length === 1 ? "" : "s"}.`;
+  if (editorDirty) msg += " Unsaved edits were not included — Save first to export them.";
+  status(msg, editorDirty ? "warn" : "ok");
 });
 
 $("importBtn").addEventListener("click", () => $("importFile").click());
@@ -483,7 +581,7 @@ function cleanPins(raw) {
   for (const [rawSite, map] of Object.entries(raw)) {
     if (unsafeKey(rawSite) || !map || typeof map !== "object" || Array.isArray(map)) continue;
     const site = normalizeSite(rawSite);
-    if (!site || ++sites > LIMITS.sites) continue;
+    if (!site) continue;
     const clean = {};
     let n = 0;
     for (const [desc, type] of Object.entries(map)) {
@@ -492,7 +590,14 @@ function cleanPins(raw) {
       clean[desc] = type;
       if (++n >= LIMITS.pinsPerSite) break;
     }
-    if (n) out[site] = Object.assign({}, out[site], clean);
+    if (!n) continue;
+    // Only sites that actually contribute pins consume the site budget, and a
+    // site already accepted (two raw keys normalizing alike) doesn't recount.
+    if (!(site in out)) {
+      if (sites >= LIMITS.sites) continue;
+      sites++;
+    }
+    out[site] = Object.assign({}, out[site], clean);
   }
   return out;
 }
@@ -597,6 +702,7 @@ load();
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     mergeImport, normalizeSite, cleanFields, cleanPins,
+    keywordWarning, keywordIsBlocked, BLOCKLIST, BLOCK_TOKEN_EXACT, TWO_PART_TLDS, LIMITS,
     state: () => ({ profiles, autoSites, pins, activeProfileId }),
     setProfiles: (p) => { profiles = p; }
   };

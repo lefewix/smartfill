@@ -157,6 +157,8 @@
   };
 
   // Never fill these, no matter what. Payment belongs to the browser/user.
+  // KEEP IN SYNC with BLOCKLIST in popup.js (keyword warning) — test.js
+  // asserts the two lists match.
   const BLOCKLIST = [
     "card number", "cardnumber", "card-number", "cc-number", "ccnumber",
     "cardnum", "name on card", "cardholder", "card holder",
@@ -498,10 +500,34 @@
     el.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
+  // Flash a mauve ring on a just-filled field. The original box-shadow is
+  // captured once per element (WeakMap) so a rapid double-fill can't snapshot
+  // the ring itself and leave it on permanently; a re-flash just re-arms the
+  // restore timer. box-shadow is transitioned so the ring fades instead of
+  // snapping.
+  const FLASH_STATE = new WeakMap();
+  const FLASH_MS = 1200;
+  const EASE_OUT = "cubic-bezier(0.23,1,0.32,1)";
   function flash(el) {
-    const prev = el.style.boxShadow;
-    el.style.boxShadow = "0 0 0 2px #8b5cf6";
-    setTimeout(() => { el.style.boxShadow = prev; }, 1200);
+    let st = FLASH_STATE.get(el);
+    if (st) {
+      clearTimeout(st.timer);
+    } else {
+      st = { prevShadow: el.style.boxShadow, prevTransition: el.style.transition };
+      FLASH_STATE.set(el, st);
+    }
+    el.style.transition = `box-shadow .15s ${EASE_OUT}`;
+    el.style.boxShadow = "0 0 0 2px #a288a6";
+    st.timer = setTimeout(() => {
+      el.style.boxShadow = st.prevShadow;
+      // Let the fade-out play before the inline transition is removed.
+      setTimeout(() => {
+        if (FLASH_STATE.get(el) === st) {
+          el.style.transition = st.prevTransition;
+          FLASH_STATE.delete(el);
+        }
+      }, 200);
+    }, FLASH_MS);
   }
 
   // Fuzzy select matching: exact value, exact text, then contains.
@@ -510,11 +536,10 @@
     const v = String(value).toLowerCase().trim();
     const opts = Array.from(el.options);
     const tryers = [
-      o => o.value.toLowerCase() === v,
+      o => o.value.toLowerCase() === v, // exact value covers "ON", "CA" too
       o => o.textContent.trim().toLowerCase() === v,
       o => o.textContent.trim().toLowerCase().startsWith(v),
-      o => o.textContent.toLowerCase().includes(v),
-      o => v.length <= 3 && o.value.toLowerCase() === v // e.g. "ON", "CA"
+      o => o.textContent.toLowerCase().includes(v)
     ];
     for (const test of tryers) {
       const hit = opts.find(test);
@@ -803,10 +828,13 @@
   // On-page UI (chip + preview overlays) — isolated in a shadow root
   // so host page styles can't reach it and it can't restyle the page.
   // ---------------------------------------------------------------
+  // Accent matches the popup's dark-mauve system (#a288a6 family) — no vivid
+  // purple. Entrances are a 140ms ease-out fade + 2px rise.
   const UI_CSS = `
     :host { all: initial; }
     * { box-sizing: border-box; margin: 0; padding: 0;
         font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    @keyframes sf-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
     .chip {
       position: fixed; right: 16px; bottom: 16px; pointer-events: auto;
       display: flex; align-items: center; gap: 8px;
@@ -814,31 +842,38 @@
       border-radius: 7px; box-shadow: 0 4px 16px rgba(8,5,20,.45);
       color: #ecebf0; font-size: 12px; line-height: 1.45; padding: 7px 9px;
       font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased;
+      animation: sf-in .14s ${EASE_OUT};
     }
     .chip .n { font-family: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
                font-weight: 600; color: #fff; }
     .chip .sep { color: #7d7a90; }
-    .chip .muted { color: #8a879d; }
+    .chip .muted { color: #9a97ab; }
     .chip button {
       font: inherit; font-weight: 600; cursor: pointer;
-      background: #8b5cf6; border: 1px solid #8b5cf6; color: #fff;
-      border-radius: 6px; padding: 3px 9px; transition: background .15s, border-color .15s;
+      background: #a288a6; border: 1px solid #a288a6; color: #1c1d21;
+      border-radius: 6px; padding: 3px 9px;
+      transition: background .15s ${EASE_OUT}, border-color .15s ${EASE_OUT}, transform .15s ${EASE_OUT};
     }
-    .chip button:hover { background: #9d76f8; border-color: #9d76f8; }
-    .chip button:active { transform: translateY(1px); }
-    .chip button:focus-visible { outline: 2px solid #8b5cf6; outline-offset: 2px; }
-    .box { position: fixed; border: 2px solid #8b5cf6; border-radius: 4px; pointer-events: none; }
+    .chip button:hover { background: #b299b6; border-color: #b299b6; }
+    .chip button:active { transform: scale(0.97); }
+    .chip button:focus-visible { outline: 2px solid #a288a6; outline-offset: 2px; }
+    .box { position: fixed; border: 2px solid #a288a6; border-radius: 4px; pointer-events: none;
+           animation: sf-in .12s ${EASE_OUT}; }
     .box.blocked { border-color: #4a4857; border-style: dashed; }
     .box.skip { border-color: #3d3b49; border-style: dotted; }
     .tag {
       position: fixed; pointer-events: none; max-width: 220px; overflow: hidden;
       white-space: nowrap; text-overflow: ellipsis;
       background: #17161c; border: 1px solid rgba(255,255,255,.14);
-      border-radius: 6px; padding: 2px 6px; font-size: 10.5px; letter-spacing: .01em;
-      color: #c9bdf7; box-shadow: 0 4px 16px rgba(8,5,20,.45);
+      border-radius: 6px; padding: 2px 6px; font-size: 11px; letter-spacing: .01em;
+      color: #c9b3cc; box-shadow: 0 4px 16px rgba(8,5,20,.45);
+      animation: sf-in .12s ${EASE_OUT};
     }
-    .tag.blocked { color: #8a879d; }
-    .tag.skip { color: #8a879d; }
+    .tag.blocked { color: #9a97ab; }
+    .tag.skip { color: #9a97ab; }
+    @media (prefers-reduced-motion: reduce) {
+      * { animation: none !important; transition: none !important; }
+    }
   `;
 
   let uiRoot = null;
@@ -1025,12 +1060,16 @@
     document.addEventListener("click", stop, true);
     const timer = setTimeout(stop, PREVIEW_MS);
 
-    return { preview: shown, skipped, blocked, total: rows.length };
+    // total = fields actually annotated; fields skipped because they already
+    // hold a value are neither shown nor counted, so rows.length would lie.
+    return { preview: shown, skipped, blocked, total: shown + skipped + blocked };
   }
 
   // ---------------------------------------------------------------
   // Per-site pins: descriptor → profile field, keyed by base domain
   // ---------------------------------------------------------------
+  // KEEP IN SYNC with TWO_PART_TLDS in popup.js — a content script and the
+  // popup can't share a module without a build step; test.js asserts equality.
   const TWO_PART_TLDS = new Set([
     "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au",
     "co.jp", "ne.jp", "or.jp", "co.nz", "com.br", "com.mx", "co.in", "co.kr"
@@ -1099,7 +1138,10 @@
         try {
           const pins = await loadPins();
           const result = fillPage(msg.profile, pins);
-          savePins(result.learned);
+          // Await the round-trip through the background pin queue BEFORE
+          // responding: the popup refreshes its pin list as soon as this
+          // response lands, and a fire-and-forget write would still be queued.
+          await savePins(result.learned);
           if (result.filled || result.blocked || result.skipped) showChip(result);
           sendResponse({
             ok: true,
@@ -1148,13 +1190,17 @@
         try {
           const pins = await loadPins();
           const result = fillPage(profile, pins);
-          savePins(result.learned);
+          await savePins(result.learned);
           if (result.filled) showChip(result);
         } catch { /* noop */ }
       };
       setTimeout(run, 800); // let the framework finish first paint
 
-      let t;
+      // Watch for late-rendered form fields (SPAs, multi-step checkouts), but
+      // not forever: after MAX_OBSERVED_RUNS debounced re-fills the observer
+      // disconnects, so a chatty SPA isn't re-surveyed for the life of the tab.
+      let t, observedRuns = 0;
+      const MAX_OBSERVED_RUNS = 12;
       const obs = new MutationObserver((muts) => {
         const relevant = muts.some(m =>
           Array.from(m.addedNodes).some(n =>
@@ -1165,9 +1211,13 @@
         );
         if (!relevant) return;
         clearTimeout(t);
-        t = setTimeout(run, 600); // debounce bursts of DOM changes
+        t = setTimeout(() => {
+          if (++observedRuns >= MAX_OBSERVED_RUNS) obs.disconnect();
+          run();
+        }, 600); // debounce bursts of DOM changes
       });
       obs.observe(document.documentElement, { childList: true, subtree: true });
+      window.addEventListener("pagehide", () => { obs.disconnect(); clearTimeout(t); }, { once: true });
     } catch { /* storage unavailable in this frame — ignore */ }
   }
   maybeAutofill();
@@ -1179,7 +1229,8 @@
       tokenize, hasKeyword, expandTokens, isBlockedDesc, classifyDesc, matchCustom,
       customKeywordOk, decide, baseDomain, descriptor, pinKey, visible,
       fillPage, previewPage, chipSummary, showChip, chipState: () => chipState,
-      savePins, undoFill, loadPins,
+      savePins, undoFill, loadPins, flash, fillSelect,
+      BLOCKLIST, BLOCK_TOKEN_EXACT, TWO_PART_TLDS,
       THRESHOLD, PIN_MIN_SCORE
     };
   }
